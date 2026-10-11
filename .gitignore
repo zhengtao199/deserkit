@@ -1,0 +1,31 @@
+# 大体积 / 二进制依赖
+ysoserial.jar
+*.jar
+
+# 运行时日志与临时文件
+*.log
+_server.log
+_server_stderr.log
+_server_stdout.log
+_qa*.txt
+_qa*.js
+_qa*.log
+_qa*.pid
+_qa*.h1
+_qa*.r1*
+_qa*.ro
+_qa*.t0
+_qa*.bat
+_qa_hold.py
+_qa_ro.py
+_qa2_*.js
+_qa3/
+_last_search.bin
+_smoke_probe.py
+_smoke_srv.log
+_forms_check.js
+
+# 运行时目录
+runtime/
+%TEMP%/deserkit-runtime/
+.deserkit/

