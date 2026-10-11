@@ -1,0 +1,24 @@
+# ============================================================
+# deserkit 反序列化图形化利用工具 —— Python 依赖清单
+# 用法：pip install -r requirements.txt
+# ============================================================
+#
+# 重要：本工具的 GUI / 后端服务（gui_server.py）只使用 Python 标准库
+# （http.server / subprocess / urllib / socket / ssl / ...），
+# 不依赖任何第三方 Python 包。因此下面没有“必须安装”的包，
+# 直接运行 `pip install -r requirements.txt` 不会安装任何东西，属正常。
+#
+# 若以后扩展功能（如改用 flask / requests），把对应包加在下方即可。
+# 当前无需。
+
+# ----- 非 pip 依赖（pip 装不了，需手动/另行准备，详见《环境依赖.txt》）-----
+#
+# 1) Python 3.8+           运行 gui_server.py（推荐 3.8~3.12；3.13 已验证可用）
+# 2) JDK 8（建议）         Shiro/JBoss 生成 gadget、fastjson 1.2.83 编译运行 GenFJ183；
+#                           需要 java、javac 在 PATH 中；高版本 JDK 有模块封装坑，
+#                           工具已自动加 --add-opens，但仍建议备一个 JDK8。
+# 3) ysoserial.jar (~59MB) 已被 .gitignore 排除，不随仓库走，需单独拷贝/下载：
+#                           https://github.com/frohoff/ysoserial/releases
+#                           放到本目录或 tools/ 下即可。
+# 4) Windows 权限          若以受限服务账户/计划任务运行可能“权限不足”，
+#                           建议普通用户或管理员运行 start-gui.bat / 放行端口-管理员运行.bat

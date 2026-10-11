@@ -1,0 +1,105 @@
+================================================================
+deserkit 反序列化图形化利用工具 —— 环境依赖与部署说明
+================================================================
+
+本说明分两部分：
+  A. 一行安装（pip）—— 适合已经装好 Python 的环境
+  B. 完整依赖清单与准备步骤 —— 换到陌生机器上时照着做
+
+----------------------------------------------------------------
+A. 一行安装（pip）
+----------------------------------------------------------------
+本工具的后端（gui_server.py）只使用 Python 标准库 + 同目录的
+miniaes.py，不依赖任何第三方 Python 包。因此：
+
+    pip install -r requirements.txt
+
+执行后不会安装任何东西，属正常（requirements.txt 里只有注释）。
+真正需要手动准备的“非 pip 依赖”见下方 B 部分。
+
+----------------------------------------------------------------
+B. 完整依赖清单与准备步骤
+----------------------------------------------------------------
+
+【1. Python 3.8+】
+   - 作用：运行 gui_server.py（GUI / 后端服务）。
+   - 推荐版本：3.8 ~ 3.12；3.13 已在本机验证可用。
+   - 下载：https://www.python.org/downloads/
+   - 验证：命令行执行  python --version  能看到 3.8+ 即可。
+   - 备注：无需 virtualenv，无需 pip 安装任何包。
+
+【2. 本地模块 miniaes.py】
+   - 作用：AES-CBC / AES-GCM 加解密（Shiro rememberMe、密码配置等）。
+   - 来源：已随仓库提供，与 gui_server.py 同目录，**不要删、不要单独装**。
+   - 注意：它不是 pip 包，pip 装不了，复制整个工具目录时一起带上即可。
+
+【3. JDK 8（建议准备）】
+   - 作用：
+       · Shiro / JBoss 等需要生成 gadget 时调用 java / javac；
+       · fastjson 1.2.83 利用链需要编译并运行 GenFJ183.class。
+   - 要求：java 与 javac 都在 PATH 中。
+   - 版本建议：JDK 8（高版本 JDK 有模块封装限制，工具已自动加
+     --add-opens 兜底，但仍强烈建议备一个 JDK8 以防万一）。
+   - 下载（任选其一）：
+       · Oracle JDK 8：https://www.oracle.com/java/technologies/javase/javase8-archive-downloads.html
+       · Adoptium / Temurin 8（免费开源）：https://adoptium.net/temurin/releases/?version=8
+   - 验证：命令行执行  java -version  与  javac -version  都能输出版本号。
+
+【4. ysoserial.jar（约 59MB，必需，但不在仓库里）】
+   - 作用：生成各类 Java 反序列化 gadget（fastjson / Shiro / XStream 等）。
+   - 重要：该文件被 .gitignore 排除（*.jar），**不会随 git 仓库走**，
+     换机器时必须单独拷贝或下载，否则相关利用会提示“找不到 ysoserial”。
+   - 下载地址：
+       https://github.com/frohoff/ysoserial/releases
+       （下载 ysoserial-all.jar，重命名为 ysoserial.jar 也可）
+   - 放置位置（任选其一，工具启动时会按此顺序查找）：
+       ① 工具根目录：  deserkit/ysoserial.jar
+       ② tools 子目录：deserkit/tools/ysoserial.jar
+       ③ 全量版：      deserkit/ysoserial-all.jar
+   - 自启校验：启动后访问  http://127.0.0.1:8899/api/env
+     能看到 ysoserial 路径即说明已识别。
+
+【5. 操作系统与权限】
+   - 支持：Windows / Linux / macOS（纯标准库，跨平台）。
+   - Windows 端口：工具会自动避开 Windows 保留端口区间
+     （WinError 10013），端口被占时自动向后探测可用端口。
+   - Windows 权限：若以受限服务账户 / 计划任务运行，可能“权限不足”
+     （例如放行端口、写 Program Files 目录）。建议：
+       · 普通用户或管理员直接运行  start-gui.bat；
+       · 或右键“以管理员身份运行” 放行端口-管理员运行.bat。
+   - 运行时写盘降级：不能随意写盘时，工具会自动改用
+     %TEMP%\deserkit-runtime（Windows）或 ~/.deserkit（Linux/macOS）。
+
+----------------------------------------------------------------
+C. 启动方式
+----------------------------------------------------------------
+方式一（推荐，Windows）：
+   双击  start-gui.bat  → 自动起服务并打开浏览器
+   http://127.0.0.1:8899/
+
+方式二（任意平台，命令行）：
+   cd 到工具根目录后执行：
+       python gui_server.py                     # 默认 127.0.0.1:8899，端口冲突自动后移
+       python gui_server.py --host 0.0.0.0 --port 8899   # 允许局域网访问
+       python gui_server.py --strict-port       # 端口不可用直接退出，不自动换端口
+
+方式三（管理员放行端口，Windows）：
+   右键“以管理员身份运行” 放行端口-管理员运行.bat
+
+----------------------------------------------------------------
+D. 换机器打包清单（ Checklist ）
+----------------------------------------------------------------
+把以下文件/目录整体拷到目标机器即可：
+   [√] gui_server.py
+   [√] miniaes.py
+   [√] exploit.html
+   [√] index.html
+   [√] deserkit.py
+   [√] start-gui.bat
+   [√] 放行端口-管理员运行.bat
+   [√] requirements.txt          （pip 用，可留作说明）
+   [√] 环境依赖.txt              （本文件）
+   [√] tools/                     （如放有 ysoserial.jar）
+   [ ] ysoserial.jar             ← 需单独下载/拷贝，git 不带
+目标机器另需：Python 3.8+ 与（建议）JDK 8。
+================================================================
