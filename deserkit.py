@@ -679,12 +679,12 @@ def main():
 
     pl = sub.add_parser("payload", help="Payload 生成")
     pl.add_argument("-c", "--comp", required=True, help="可选: " + ",".join(PAYLOADS.keys()))
-    pl.add_argument("--lhost", default="192.168.184.132")
+    pl.add_argument("--lhost", default="192.168.1.100")
     pl.add_argument("--lport", default="9988")
     pl.add_argument("--jrmp", default="10099")
     pl.add_argument("--dnslog", default="abc123.dnslog.cn")
     pl.add_argument("--cmd", default="id")
-    pl.add_argument("--target", default="http://192.168.184.162:8080")
+    pl.add_argument("--target", default="http://192.168.1.10:8080")
     pl.set_defaults(func=cmd_payload)
 
     sh = sub.add_parser("shell", help="反弹 Shell 生成")

