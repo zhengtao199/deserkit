@@ -25,6 +25,14 @@ _smoke_probe.py
 _smoke_srv.log
 _forms_check.js
 
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 编译/调试临时目录（非工具源码）
+_jndi/
+_jtest/
+
 # 运行时目录
 runtime/
 %TEMP%/deserkit-runtime/
